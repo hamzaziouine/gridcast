@@ -1,0 +1,12 @@
+// GridCast public API (Worker fallback host, BUILD_PLAN §3.0 item 8).
+// Deployed by Cloudflare Workers Builds from this directory (root directory = infra/worker).
+// P0.4 hello-world: no bindings yet; the R2 binding to gridcast-public is added when
+// the hourly job starts publishing snapshots.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "gridcast",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "observability": { "enabled": true }
+}
