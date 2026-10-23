@@ -10,3 +10,5 @@ __pycache__/
 mlruns/
 data/
 .superpowers/
+.neon
+.env.local
