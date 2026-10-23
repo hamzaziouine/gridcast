@@ -1,4 +1,4 @@
-"""C7: baselines (exact values, as-of), interval offsets, rolling-origin harness on synthetic data."""
+"""C7: baselines (exact values, as-of), interval offsets, rolling-origin harness (synthetic)."""
 
 from __future__ import annotations
 
