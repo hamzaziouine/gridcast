@@ -8,7 +8,9 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 mlruns/
-data/
+# raw downloads and caches only; small reference CSVs under data/ stay trackable
+data/raw/
+data/cache/
 .superpowers/
 .neon
 .env.local
