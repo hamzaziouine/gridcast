@@ -543,3 +543,68 @@ The live slack `fetched_at − modelled available_at` must be ≥ 0. Record it h
   _TODO: record the value shown on the project's Usage page._
 - `RealtimeDemandZonal` (not used by Core; §3.9b of the plan).
 - RealtimeTotals cadence over a full day (§1.4 TODO).
+
+---
+
+## 8. C2 — PUB_Demand backfill (2026-10-23, ~20:30Z)
+
+`scripts/backfill_demand.py` loaded the newest version of each year (2015–2026) into Neon with
+modelled stamps. The listing names the newest version per year explicitly (`_v1` for 2015–2017,
+`_v253` for 2018, `_v395`–`_v397` for 2019–2025, `_v295` for 2026), so `file_version` is recorded
+for every row.
+
+| file | rows parsed | rows inserted |
+|---|---:|---:|
+| `PUB_Demand_2015_v1.csv` … `2017_v1` | 8,760 / 8,784 / 8,760 | all |
+| `PUB_Demand_2018_v253.csv` … `2024_v395` | 8,760 or 8,784 | all |
+| `PUB_Demand_2025_v396.csv` | 8,759 | 8,759 |
+| `PUB_Demand_2026_v295.csv` | 7,081 | 7,080 (today's provisional HE1 not stored, see below) |
+
+- `actuals` = **103,511** rows = 8,760 × 11 years + 3 leap days × 24 − 1 + 295 days × 24, span
+  2015-01-01 05:00Z … 2026-10-23 04:00Z. The **only missing hour is 2025-05-01 05:00Z**
+  (2025-05-01 HE1, the Market Renewal cutover). Every other year has 8,760/8,784 rows.
+- Re-running the backfill inserted 0 rows and left every `available_at` unchanged (output in §8.3).
+
+### 8.1 Version and availability rules as built (`ingest/ieso_demand.py`)
+
+- A `raw_demand_history` row is written only when the hour's latest stored version differs in
+  Market or Ontario Demand.
+- Backfill (`modelled`): the first version of an hour gets `D+1 13:00Z`. A row whose modelled stamp
+  is after our fetch time is **not stored** — this only ever hits today's provisional HE1, which the
+  next file revises (2026-10-21 HE1: 13,721 → 13,783 MW, +62; 2026-10-22 HE1: 13,912 → 13,961, +49;
+  diff of `_v293`/`_v294`/`_v295` shows that the provisional HE1 is the only value that changes
+  between consecutive daily versions).
+- A **revision** of an already-stored hour is stamped `observed` at our fetch time in both modes:
+  we know only that it changed by then. Earlier versions keep their stamps.
+- Live daily ingest (`observed`, C11) stamps every new or changed row with the fetch time.
+- **For C6:** a PUB row's `available_at` is the Ontario Demand stamp. Its Market Demand column is
+  available under `availability.market_demand_available_at` (target + `REALTIME_LAG_H`, plan §3.0
+  decision 1); apply that rule to the column, not the row stamp.
+
+### 8.2 Damaged-hour check on PUB_Demand (2015–2026)
+
+The plan's ±50 % week-over-week rule flags **2 hours** on `PUB_Demand` over 2015–2026:
+2018-09-16 HE14 (19,504 MW) and HE15 (19,838 MW). They are **real**: a hot Sunday (Market Demand
+21,430/21,862 MW in the same rows, a smooth ramp 19,170 → 20,338 MW over HE13–16) between two
+mild Sundays (12,829 and 12,963 MW at HE14). The ratio is 1.52, just over the 1.5 limit. They are
+kept. This confirms plan §3.0 decision 4: the filter is not applied to the target series (it would
+delete genuine heat-wave hours); it applies to zonal data only. Suspect zonal-vs-PUB hours stay
+listed in §4.3.
+
+### 8.3 Idempotency check (second run, same day)
+
+```
+PUB_Demand_2015_v1.csv: parsed=8760 inserted=0 actuals_changed=0
+...
+PUB_Demand_2025_v396.csv: parsed=8759 inserted=0 actuals_changed=0
+PUB_Demand_2026_v295.csv: parsed=7081 inserted=0 actuals_changed=0
+files: 12, inserted: 0
+raw_demand_history rows: 103511
+actuals rows: 103511 (span 2015-01-01 05:00:00+00:00 .. 2026-10-23 04:00:00+00:00, 103512 hours)
+missing hours in span: 1
+  missing 2025-05-01 05:00:00+00:00
+```
+
+The integration test `tests/integration/test_ieso_demand_db.py` asserts the same on the fixture
+(second run: 0 rows, every `available_at` unchanged) plus the revision path. Neon size after C2:
+`raw_demand_history` 25 MB, `actuals` 11 MB, `pg_database_size` 45 MB.

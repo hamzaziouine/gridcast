@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 import pytest
 from alembic import command
@@ -197,9 +198,14 @@ def test_raw_demand_history_source_columns(
     engine.dispose()
 
 
-def test_cli_db_ping_and_upgrade(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_db_ping_and_upgrade(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Run from an empty directory: Settings reads `.env` from the cwd, and a developer's .env
+    # holds the real Neon DATABASE_URL_DIRECT, which `db upgrade` prefers. Tests never touch Neon.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DATABASE_URL", migrated_url)
-    monkeypatch.delenv("DATABASE_URL_DIRECT", raising=False)
+    monkeypatch.setenv("DATABASE_URL_DIRECT", migrated_url)
     runner = CliRunner()
     ping = runner.invoke(app, ["db", "ping", "--no-retry"])
     assert ping.exit_code == 0, ping.output
