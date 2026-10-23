@@ -28,7 +28,9 @@ def test_migration_url_prefers_direct(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert db.migration_url() == "postgresql://pooled"
 
 
-@pytest.mark.parametrize("command", [["db", "ping"], ["db", "upgrade"]])
+@pytest.mark.parametrize(
+    "command", [["db", "ping"], ["db", "upgrade"], ["ingest", "realtime"], ["ingest", "adequacy"]]
+)
 def test_db_commands_exit_2_without_url(
     command: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
