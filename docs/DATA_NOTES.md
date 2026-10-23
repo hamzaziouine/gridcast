@@ -608,3 +608,55 @@ missing hours in span: 1
 The integration test `tests/integration/test_ieso_demand_db.py` asserts the same on the fixture
 (second run: 0 rows, every `available_at` unchanged) plus the revision path. Neon size after C2:
 `raw_demand_history` 25 MB, `actuals` 11 MB, `pg_database_size` 45 MB.
+
+---
+
+## 9. C3 — Weather storage check and layout decision (2026-10-23)
+
+Plan §3.0 decision 5 moved the weather start from 2022-01-01 to **2018-01-01**. Before loading, the
+storage was measured, not estimated: each layout was filled with one year of rows on a local
+PostgreSQL 16 (embedded `pgserver`), `VACUUM ANALYZE`d, and read with `pg_total_relation_size`
+(heap + indexes).
+
+| Item | Measured | For the Neon budget |
+|---|---|---|
+| Empty schema 0001 on Neon (`pg_database_size`) | 8.4 MB | 8.4 MB |
+| `raw_demand_history` + `actuals`, 2015 → now, on Neon after C2 | 25 MB + 11 MB | 36 MB |
+| `predictions`, 260 B/row incl. 3 indexes | 54.7 MB per model-year | 7 names × 1 year = 383 MB; with the §4.4 90-day prune of 3 names = **259 MB** |
+| `weather_hourly` as in 0001 (row per city-hour) | 167 B/row → 8.8 MB/year | 2018 → now: **77 MB** |
+| `weather_hourly` wide (row per hour, 54 `real` columns) | 344 B/row → 3.0 MB/year | 2018 → now: **27 MB** |
+
+Against the 0.5 GB cap (taken as 500 MB; 60 % = 300 MB), weather + demand + one year of
+predictions is 8 + 36 + 259 + 77 = **380 MB (76 %)** with the 0001 layout and 8 + 36 + 259 + 27 =
+**330 MB (66 %)** with the wide layout.
+
+**Decision (builder's call): wide layout, migration `0002_weather_wide`.** One row per hour with a
+`real` column per (variable, city), named `<variable>_<city>` (`temperature_2m_toronto`,
+`snowfall_thunder_bay`, …), plus `source`, `available_at`, `available_at_kind`, `fetched_at`
+once per hour. It is lossless (all 9 variables × 6 cities stay; no aggregate, no rounding), it is
+65 % smaller, and it is already the feature-matrix shape, so the live snapshot frame
+(`openmeteo.fetch_live`) and the training frame have the same columns. `weather_locations` keeps
+the 6 cities and their weights (seeded by 0002). `v_training_base` now returns one row per hour
+with the 54 weather columns and `weather_available_at`.
+
+Rejected: a city-weighted aggregate (loses the per-city features of plan §4.5); scaled `smallint`
+columns (another ~12 MB saved, at the cost of a decode step everywhere).
+
+**The remaining overshoot is predictions, not weather.** Even with weather at 27 MB the year-one
+total stays above 60 %, and `scores` (similar row count, not measured yet) comes on top: plan
+§4.4 assumed ~136 B per prediction row (200 MB per 1.47 M rows); the measured figure is 260 B. This
+is flagged for C9/C10 (see the Day-2 report): the §4.4 levers alone do not keep year one under
+0.5 GB.
+
+### 9.1 Open-Meteo facts seen live while building C3
+
+- With a single `models=gfs_seamless`, the response keys are the plain variable names (no model
+  suffix). Several coordinates in one request return a JSON list in request order.
+- The live Forecast API with `past_hours=24&forecast_hours=48` returns **72** hourly rows, from
+  `floor(now) − 24 h` to `floor(now) + 47 h` (fetched 2026-10-23 20:27Z: 2026-10-22 20:00Z …
+  2026-10-25 19:00Z). The plan's span "`[issue_time − 24 h, issue_time + 48 h]`" is therefore
+  `[issue_time − 24 h, issue_time + 47 h]` in interval starts; target hours `issue + 1 … issue + 24`
+  are covered.
+- In the historical archive, `shortwave_radiation`, `precipitation` and `snowfall` are null for
+  2018-01-01T00:00Z in every city (accumulated variables start one hour later); everything else is
+  non-null.

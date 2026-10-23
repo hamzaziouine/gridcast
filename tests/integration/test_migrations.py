@@ -86,7 +86,7 @@ def test_all_objects_exist(migrated_url: str) -> None:
         assert _relations(conn, "v") >= VIEWS
         assert _relations(conn, "i") >= INDEXES
         version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "0001_initial"
+        assert version == "0002_weather_wide"
         server = conn.execute(text("SHOW server_version_num")).scalar_one()
         assert int(server) >= 160000
     engine.dispose()
