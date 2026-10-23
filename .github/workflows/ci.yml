@@ -32,9 +32,9 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      # Integration tests run against the service container; unit tests ignore it.
-      DATABASE_URL: postgresql+psycopg://gridcast:gridcast@localhost:5432/gridcast
-      DATABASE_URL_DIRECT: postgresql+psycopg://gridcast:gridcast@localhost:5432/gridcast
+      # Integration tests create and drop their own databases on the service container.
+      # They read GRIDCAST_TEST_DATABASE_URL (never DATABASE_URL) so a real Neon URL is never touched.
+      GRIDCAST_TEST_DATABASE_URL: postgresql+psycopg://gridcast:gridcast@localhost:5432/gridcast
     steps:
       - uses: actions/checkout@v4
 
