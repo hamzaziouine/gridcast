@@ -32,11 +32,12 @@ from gridcast.features.build import (
     H_NS,
     DemandHistory,
     FeatureBuilder,
+    assert_asof,
     from_ns,
     to_ns,
 )
 from gridcast.models.baselines import BASELINES, baseline_frame
-from gridcast.models.intervals import IntervalOffsets, fit_offsets
+from gridcast.models.intervals import LEAD_TIME_ALLOWANCE, IntervalOffsets, fit_offsets
 from gridcast.timeutil import EST, est_date, he_to_utc
 
 TRAIN_START = datetime(2018, 1, 2, tzinfo=UTC)
@@ -188,6 +189,25 @@ def load_actuals(engine: Engine) -> pd.Series:
     return pd.Series(df["v"].to_numpy(np.float64), index=idx)
 
 
+def headline(result: BacktestResult) -> dict[str, float]:
+    s = {k: {str(m): float(v) for m, v in col.items()} for k, col in result.summary().items()
+         if k != "coverage_basis"}  # fmt: skip
+    out = {
+        "lgbm_mape": s["mape"]["lgbm"],
+        "lgbm_peak_mape": s["peak_mape"]["lgbm"],
+        "lgbm_coverage_80_heldout": s["coverage_80"]["lgbm"],
+        "sn168_mape": s["mape"]["seasonal_naive_168"],
+        "skill_vs_sn168": 1 - s["mape"]["lgbm"] / s["mape"]["seasonal_naive_168"],
+    }
+    for name in s["mape"]:
+        out[f"{name}_mape"] = s["mape"][name]
+        out[f"{name}_peak_mape"] = s["peak_mape"][name]
+        out[f"{name}_coverage_80"] = s["coverage_80"][name]
+        for season in ("winter", "spring", "summer", "fall"):
+            out[f"{name}_mape_{season}"] = s[f"mape_{season}"][name]
+    return out
+
+
 def _actual_lookup(actuals: pd.Series, targets_ns: np.ndarray) -> np.ndarray:
     a = pd.Series(actuals.to_numpy(np.float64), index=to_ns(actuals.index))
     return a.reindex(targets_ns).to_numpy()
@@ -259,13 +279,60 @@ def run_backtest(
             base.loc[mm, "p10"], base.loc[mm, "p90"] = p10, p90
     parts.append(base.drop(columns=["input_available_at"]))
 
+    # ---- LightGBM, one model per (fold, horizon)
+    result_models: dict[int, Any] = {}
     offsets: IntervalOffsets | None = None
     if with_lgbm:
-        raise NotImplementedError("the LightGBM model arrives in C8")
+        from gridcast.models.lgbm import LgbmForecaster
+
+        result_models = {f.k: LgbmForecaster() for f in folds}
+        # The issue grid stops where the weather can still cover all 24 targets.
+        wx_last = pd.Timestamp(weather["valid_time"].max())
+        last_end = min(pd.Timestamp(max(f.end for f in folds)), wx_last - pd.Timedelta(hours=24))
+        train_issues = pd.date_range(TRAIN_START, last_end, freq="h", tz=UTC)
+        tr_ns = to_ns(train_issues)
+        log(f"issue-level features for {len(tr_ns)} hourly issue times")
+        issue_feats = fb.issue_frame(tr_ns)
+        test_pos = pd.Series(np.arange(len(tr_ns)), index=tr_ns).reindex(to_ns(test_all))
+        if test_pos.isna().any():
+            raise ValueError("test issue times outside the training issue grid")
+        lg_rows = []
+        for h in range(1, 25):
+            fr = fb.frame(train_issues, [h], issue=issue_feats)
+            y = _actual_lookup(actuals, to_ns(fr["target_time"]))
+            tgt = to_ns(fr["target_time"])
+            for f in folds:
+                tr = (tgt < to_ns([f.train_end])[0]) & ~np.isnan(y)
+                te_idx = test_pos.reindex(to_ns(test_sets[f.k])).to_numpy().astype(int)
+                train_rows, test_rows = fr[tr], fr.iloc[te_idx]
+                assert_asof(train_rows)
+                assert_asof(test_rows)
+                result_models[f.k].fit_horizon(h, train_rows, y[tr])
+                lg_rows.append(
+                    pd.DataFrame(
+                        {
+                            "issue_time": test_rows["issue_time"].to_numpy(),
+                            "target_time": test_rows["target_time"].to_numpy(),
+                            "horizon": h,
+                            "model_name": "lgbm",
+                            "p50": result_models[f.k].predict(test_rows),
+                            "fold": f.k,
+                        }
+                    )
+                )
+            log(f"lgbm h={h:2d}: fitted {len(folds)} folds")
+        lg = pd.concat(lg_rows, ignore_index=True)
+        lg["actual"] = _actual_lookup(actuals, to_ns(lg["target_time"]))
+        fit_part = lg[~lg["fold"].isin(HELDOUT_FOLDS)]
+        offsets = fit_offsets(
+            fit_part, LEAD_TIME_ALLOWANCE, "backtest folds 1-10 residuals x 1.15 (bootstrap)"
+        )
+        lg["p10"], lg["p90"] = offsets.apply(lg["p50"].to_numpy(), lg["horizon"].to_numpy())
+        parts.append(lg.drop(columns=["actual"]))
 
     preds = pd.concat(parts, ignore_index=True)
     preds["actual"] = _actual_lookup(actuals, to_ns(preds["target_time"]))
     preds["is_peak"] = label_peaks(preds["target_time"], preds["actual"], thresholds)
     months = pd.DatetimeIndex(preds["target_time"]).tz_convert(EST).month
     preds["season"] = [SEASONS[m] for m in months]
-    return BacktestResult(folds, preds, pd.DataFrame(parity), offsets)
+    return BacktestResult(folds, preds, pd.DataFrame(parity), offsets, result_models)

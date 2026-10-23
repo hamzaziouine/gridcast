@@ -915,3 +915,49 @@ to ≈ 100 B/row ≈ 147 MB, or ≈ 100 MB if the 90-day prune also covers the s
 names (their `score_daily` aggregates stay). With that: ≈ 74 + 7 + 96 + 105 + 100–147 ≈ 380–430 MB.
 The `ieso_forecast_snapshots` row (222 B: `source_file` text duplicated by the ledger, `numeric`
 MW) could shrink the same way, to ≈ 35 MB/year. `zonal_actuals` (Phase D, ~40 MB) comes on top.
+
+---
+
+## 15. C8 — LightGBM backtest and the bootstrap target (2026-10-23)
+
+`models/lgbm.py`: 24 per-horizon boosters, objective `l1`, learning rate 0.03, 63 leaves,
+`min_data_in_leaf` 50, feature/bagging fraction 0.8, seed fixed, `deterministic=True`; at most 400
+rounds, early stopping (40) on the last 90 days of each training window, then a refit on the whole
+window with the best round count. Artifact: gzipped JSON of LightGBM's text model format (no pickle).
+`models/intervals.py`: p10/p90 from per-horizon 10/90 % quantiles of relative residuals on folds
+1–10 × 1.15, coverage measured on the held-out folds 11–12 only. Training issue times are hourly
+from 2018-01-02 (≈ 67–76 k rows per horizon and fold).
+
+**Backtest, 12 folds 2025-10 … 2026-09, 35,040 forecasts per model (MAPE in %):**
+
+| model | pooled | winter | spring | summer | fall | peak hours | h 1–6 | h 7–12 | h 13–24 | coverage_80 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **lgbm** | **2.612** | 2.034 | 2.578 | 3.198 | 2.625 | 3.147 | 2.407 | 2.594 | 2.723 | **0.823** (folds 11–12) |
+| seasonal_naive_168 | 6.652 | 5.428 | 6.023 | 9.600 | 5.520 | 8.166 | 6.658 | 6.653 | 6.649 | 0.786 |
+| seasonal_naive_24 | 6.397 | 4.683 | 7.034 | 8.183 | 5.644 | 6.447 | 5.854 | 6.310 | 6.713 | 0.774 |
+| persistence | 10.362 | 8.126 | 9.527 | 13.254 | 10.493 | 17.954 | 10.186 | 10.194 | 10.534 | 0.783 |
+
+LightGBM per fold: 2.26, 3.27, 2.12, 2.01, 1.99, 2.55, 2.58, 2.59, 2.92, 3.12, 3.55, 2.35. Skill vs
+`seasonal_naive_168` = 1 − 2.612 / 6.652 = **60.7 %**. LightGBM interval coverage: 0.786 (fold 11,
+2026-08), 0.862 (fold 12, 2026-09), 0.823 pooled held-out; 0.853 on folds 1–10 (in-sample for the
+quantiles, the 1.15 allowance makes them wider than nominal there, as designed).
+
+**Target (§4.7): met.** MAPE 2.612 ≤ 4.0; 60.7 % ≥ 30 % better than `seasonal_naive_168`; held-out
+coverage 0.823 inside `COVERAGE_BAND` (0.76, 0.84). Logged to MLflow (local store; DagsHub not set
+up yet) as run `5279075b2a8748f0991e3138779b3ef6`, experiment `gridcast-backtest`.
+
+Caveats, stated plainly: (1) backtest weather is the historical-forecast archive with the synthetic
+`valid_time − 24 h` stamp, optimistic by design (R11, S4); live MAPE will be higher. (2) Held-out
+coverage covers only August and September; the per-fold spread (0.786 vs 0.862) shows the band
+check is noisy on two folds. (3) Most horizons stopped at the 400-round cap, not by early stopping
+(e.g. h 12: 398), so the model is not tuned; no tuning was done (the target was met on the first run).
+
+**Runtime (new risk for retrain.yml):** the full backtest took **6,270 s (104 min)** on this
+16-thread laptop (576 booster fits: probe + refit × 24 horizons × 12 folds). A GitHub runner has
+4 vCPUs, so `gridcast train` (backtest + final fit) would take several hours there. Levers before
+C17: drop the refit and keep the early-stopped probe, `max_bin` 63, a 2-hourly training grid, or
+train from a cached feature Parquet.
+
+MLflow ≥ 3 refuses the plain `./mlruns` file store (`MLFLOW_ALLOW_FILE_STORE` needed), so the local
+fallback is SQLite `./mlruns/mlflow.db` with artifacts in `./mlruns/` (git-ignored); setting
+`MLFLOW_TRACKING_URI` switches to DagsHub with no code change.
