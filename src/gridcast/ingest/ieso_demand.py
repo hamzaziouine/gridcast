@@ -38,6 +38,7 @@ from typing import Literal
 import pandas as pd
 from sqlalchemy import Connection, Engine, text
 
+from gridcast import contracts
 from gridcast.ingest.availability import pub_demand_available_at
 from gridcast.ingest.http import EmptyFeedError, Fetched, list_directory
 from gridcast.timeutil import EST, he_to_utc
@@ -283,6 +284,7 @@ def ingest_pub_demand(engine: Engine, fetched: Fetched, mode: Mode) -> IngestRes
         mode=mode,
         http_last_modified=fetched.last_modified,
     )
+    contracts.RawDemand.validate(rows)
     with engine.begin() as conn:
         changed = append_raw_demand(conn, rows)
         n_actuals = rebuild_actuals(conn, changed)
