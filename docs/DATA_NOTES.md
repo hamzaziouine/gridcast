@@ -784,3 +784,43 @@ Victoria Day, Canada Day, Labour Day, Thanksgiving, Christmas and Boxing Day onl
 Holiday (first Monday of August) is under its *optional* category, together with Easter Monday and
 Remembrance Day. Plan §3.5 counts the Civic Holiday, so `features/calendar.py` adds it from the
 optional category and leaves the other two out (not widely observed in Ontario).
+
+---
+
+## 13. C7 — baselines and the rolling-origin harness (2026-10-23)
+
+`models/baselines.py`, `models/intervals.py`, `backtest/harness.py`; `gridcast backtest`.
+
+- **Folds:** the 12 EST months 2025-10 … 2026-09 (the last month whose test targets all have final
+  actuals; `actuals` ends 2026-10-23 04:00Z). Fold k trains on targets before `month start − 2 days`.
+  Test issue times every 6 h (00/06/12/18Z), 24 horizons: 1,460 issue times, 35,040 forecasts per
+  model.
+- **Baselines** read Ontario Demand under the PUB rule (8–32 h old): `seasonal_naive_168` =
+  target − 168 h; `seasonal_naive_24` = target − 24 h, else − 48 h, else − 72 h (the plan lists
+  24 → 48; at early-morning issue times even − 48 h is not yet published, so a third step was
+  needed); `persistence` = newest visible hour. Their p10/p90 come from their own relative
+  residuals over the 60 days before each fold's training cutoff.
+- **Peak hours:** P90 (linear interpolation, = `percentile_cont`) of the 720 final actuals of the
+  30 EST days before the target's EST day; 4,040 of 35,040 test targets are peak hours.
+- **Leakage assertion** active on every fold; **lag parity:** `issue_time − L0 hour` = 1 h for every
+  test issue of every fold; weather margin (cutoff − newest weather input) = 23.5 h everywhere
+  (the synthetic `valid_time − 24 h` stamp, R11).
+
+**Baseline backtest** (`gridcast backtest --no-lgbm`, Neon, 2026-10-23; MAPE in %):
+
+| model | pooled MAPE | winter | spring | summer | fall | peak-hour MAPE | coverage_80 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| seasonal_naive_168 | **6.652** | 5.428 | 6.023 | 9.600 | 5.520 | 8.166 | 0.786 |
+| seasonal_naive_24 | 6.397 | 4.683 | 7.034 | 8.183 | 5.644 | 6.447 | 0.774 |
+| persistence | 10.362 | 8.126 | 9.527 | 13.254 | 10.493 | 17.954 | 0.783 |
+
+`seasonal_naive_168` = 6.65 %, inside the plan's plausible 5–8 % range. Per fold it runs from
+4.41 % (2025-11) to 10.65 % (2026-06 and 2026-07: summer heat).
+
+**2023 folds** (`gridcast backtest --no-lgbm --month 2023-01 --month 2023-07`), assertion active:
+
+```
+ fold      month                 train_end  n_test_issues l0_lag_h weather_margin_h  null_l0  null_mean24  null_lag168
+    1 2023-01-01 2022-12-30T05:00:00+00:00            124    1:124       23.5..23.5        0            0            0
+    2 2023-07-01 2023-06-29T05:00:00+00:00            124    1:124       23.5..23.5        0            0            0
+```

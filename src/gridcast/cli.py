@@ -110,5 +110,32 @@ def ingest_adequacy(
     typer.echo(" ".join(f"{k}={v}" for k, v in counts.items()))
 
 
+@app.command()
+def backtest(
+    lgbm: bool = typer.Option(False, "--lgbm/--no-lgbm", help="Include LightGBM (C8)."),
+    month: list[str] = typer.Option(  # noqa: B008 - Typer's documented pattern
+        [], help="Fold month YYYY-MM (repeatable); default: the last 12 complete months."
+    ),
+) -> None:
+    """Rolling-origin backtest (12 monthly folds) of the baselines and LightGBM; prints tables."""
+    from datetime import date
+
+    from gridcast.backtest.harness import Fold, load_actuals, run_backtest
+    from gridcast.features.build import load_history, load_weather
+
+    engine = _jobs_engine()
+    try:
+        raw, weather, actuals = load_history(engine), load_weather(engine), load_actuals(engine)
+    finally:
+        engine.dispose()
+    folds = [
+        Fold(k, date.fromisoformat(m + "-01")) for k, m in enumerate(sorted(month), start=1)
+    ] or None
+    res = run_backtest(raw, weather, actuals, folds=folds, with_lgbm=lgbm, log=typer.echo)
+    typer.echo(res.lag_parity.to_string(index=False))
+    typer.echo(res.summary().round(3).T.to_string())
+    typer.echo(res.per_fold().round(2).to_string())
+
+
 if __name__ == "__main__":
     app()
