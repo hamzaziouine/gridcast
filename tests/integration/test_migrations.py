@@ -1,8 +1,9 @@
-"""P0.3: 0001_initial applies cleanly to a real PostgreSQL, is re-runnable and round-trips."""
+"""P0.3 + 0002 + 0003: migrations apply cleanly to PostgreSQL 16, re-run and round-trip."""
 
 from __future__ import annotations
 
 import uuid
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -33,8 +34,12 @@ TABLES = {
     "pipeline_runs",
     "zonal_actuals",
     "zone_hourly_estimates",
+    "prediction_models",
+    "model_versions",
+    "prediction_runs",
+    "ieso_adequacy_files",
 }
-VIEWS = {"raw_demand", "v_training_base"}
+VIEWS = {"raw_demand", "v_training_base", "v_predictions"}
 API_RO_TABLES = {
     "predictions",
     "scores",
@@ -44,12 +49,13 @@ API_RO_TABLES = {
     "pipeline_runs",
     "model_registry_events",
     "zone_hourly_estimates",
+    "prediction_models",
+    "model_versions",
+    "prediction_runs",
 }
 INDEXES = {
     "ix_raw_demand_history_target_available",
     "ix_ieso_forecast_snapshots_target_created",
-    "ix_predictions_target_time",
-    "ix_predictions_model_issue",
     "pipeline_runs_one_ok",
     "ix_zonal_actuals_zone_target",
 }
@@ -86,7 +92,7 @@ def test_all_objects_exist(migrated_url: str) -> None:
         assert _relations(conn, "v") >= VIEWS
         assert _relations(conn, "i") >= INDEXES
         version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "0002_weather_wide"
+        assert version == "0003_compact_predictions"
         server = conn.execute(text("SHOW server_version_num")).scalar_one()
         assert int(server) >= 160000
     engine.dispose()
@@ -212,6 +218,46 @@ def test_cli_db_ping_and_upgrade(
     assert "PostgreSQL" in ping.output
     upgrade = runner.invoke(app, ["db", "upgrade"])
     assert upgrade.exit_code == 0, upgrade.output
+
+
+def test_v_predictions_restores_the_plan_columns(migrated_url: str) -> None:
+    engine = db.make_engine(migrated_url)
+    run = uuid.uuid4()
+    with engine.begin() as conn:
+        vid = conn.execute(
+            text(
+                "INSERT INTO model_versions (model_version)"
+                " VALUES ('2026-10-23T20:35:02+00:00') RETURNING version_id"
+            )
+        ).scalar_one()
+        conn.execute(
+            text(
+                "INSERT INTO prediction_runs (issue_time, model_id, run_id, run_kind)"
+                " VALUES ('2026-10-23 21:00Z', 7, :run, 'manual')"
+            ),
+            {"run": run},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO predictions (issue_time, model_id, horizon, version_id, p50)"
+                " VALUES ('2026-10-23 21:00Z', 7, 3, :v, 15123.5)"
+            ),
+            {"v": vid},
+        )
+        row = conn.execute(text("SELECT * FROM v_predictions")).mappings().one()
+    assert str(row["target_time"].astimezone(UTC)) == "2026-10-24 00:00:00+00:00"
+    assert row["model_name"] == "ieso_adequacy" and row["run_id"] == run
+    assert row["ieso_staleness_min"] == 55  # 21:30Z cutoff - 20:35:02Z snapshot
+    assert row["p50"] == pytest.approx(15123.5)
+    with pytest.raises(IntegrityError), engine.begin() as conn:  # p10 above p50
+        conn.execute(
+            text(
+                "INSERT INTO predictions (issue_time, model_id, horizon, version_id, p50, p10)"
+                " VALUES ('2026-10-23 21:00Z', 7, 4, :v, 100, 200)"
+            ),
+            {"v": vid},
+        )
+    engine.dispose()
 
 
 def test_downgrade_then_upgrade_round_trips(migrated_url: str) -> None:

@@ -824,3 +824,94 @@ optional category and leaves the other two out (not widely observed in Ontario).
     1 2023-01-01 2022-12-30T05:00:00+00:00            124    1:124       23.5..23.5        0            0            0
     2 2023-07-01 2023-06-29T05:00:00+00:00            124    1:124       23.5..23.5        0            0            0
 ```
+
+---
+
+## 14. Storage fixes for year one (2026-10-23): Adequacy3 retention and a compact predictions row
+
+§9–§10 showed year one would pass Neon's 0.5 GB. Two fixes, migration `0003_compact_predictions`.
+
+### 14.1 Adequacy3 retention
+
+Rule (`ieso_adequacy.prune_snapshots`, run at the end of every `ingest adequacy` and by
+`gridcast prune adequacy`): for delivery date D keep every version created at or after
+**(D − 2 days) 00:00 EST**, plus the **newest version created before that**. Issue times whose 24
+targets touch D start at D−1 00:00 EST, so the benchmark (latest snapshot ≤ `data_cutoff`) is always
+a kept version. A new ledger `ieso_adequacy_files` (one row per file version read: `created_at`,
+`archive_key`, `rows_kept`) replaces "distinct `source_file` in the snapshots" as the record of
+what was downloaded, so pruned versions are never fetched again. New raw XML goes to the private
+bucket (`raw/ieso/adequacy3/YYYY/MM/DD/<file>.xml.gz`) whenever `OBJSTORE_*` is set.
+
+Run on Neon, 2026-10-23 ~22:30Z, in this order:
+
+```
+gridcast db upgrade                      -> 0003_compact_predictions (ledger seeded: 232 files)
+scripts/copy_archive_fallback.py         -> local files: 232, uploaded: 232, already in bucket: 0,
+                                            ledger rows updated: 232, objects under raw/ieso/adequacy3/: 232
+gridcast prune adequacy --vacuum-full    -> files_pruned=186 rows_deleted=4464
+                                            ieso_forecast_snapshots = 245760 bytes
+```
+
+Kept: 2026-10-23 = 37 versions (newest pre-cutoff 10-20 20:34Z + 36 since 10-21 05:00Z),
+2026-10-24 = 6, 2026-10-25 = 3. The archive in the bucket was verified byte for byte before any
+row was deleted; the local copy under `data/raw/` is still in place.
+
+A complete delivery date keeps about **54 versions** (≈ 2 on D−2, 3 on D−1 before 20:28 EST, ~7
+after, ~48 on D, + 1 older) instead of ~120: ≈ 473k rows/year × 222 B/row (measured on Neon after
+`VACUUM FULL`) ≈ **105 MB/year** (was ≈ 220 MB).
+
+### 14.2 Compact `predictions`
+
+`predictions` was empty, so 0003 drops and re-creates it:
+
+| | 0001 | 0003 |
+|---|---|---|
+| MW columns | `numeric(9,2)` | `real` |
+| horizon | smallint | smallint |
+| model_name / model_version | text / text | `model_id smallint` → `prediction_models`; `version_id int` → `model_versions` |
+| run_id, run_kind, created_at | per row | per (issue_time, model) in `prediction_runs` |
+| target_time, ieso_staleness_min | stored | derived in the view `v_predictions` (issue_time + horizon h; cutoff − snapshot created_at) |
+| indexes | PK (issue, target, model_name) + 2 | PK **(issue_time, model_id, horizon)** only |
+
+`v_predictions` returns the plan's §4.3 column set, so readers do not change. The PK starts with
+`issue_time` so hourly inserts always land on the right-most leaf: with `model_id` first, the same
+data measured 130 B/row because mid-index leaf splits leave pages half empty.
+
+**Measured on PostgreSQL 16.2 (embedded pgserver), 1,008,000 rows = 6,000 issues × 7 names × 24,
+`VACUUM ANALYZE`, `pg_total_relation_size` incl. indexes** (`scripts/measure_predictions_size.py`):
+
+```
+0002_weather_wide: 230.5 MB total, 228.7 B/row (predictions 230.5 MB)
+0003_compact_predictions: 97.0 MB total, 96.2 B/row (predictions 91.5 MB, prediction_runs 4.6 MB, model_versions 0.9 MB)
+scores (0001 layout, unchanged): 200.3 MB total, 198.7 B/row (scores 200.3 MB)
+```
+
+(§9's 260 B/row for 0001 used longer version strings; on identical data 0003 is 58 % smaller.)
+
+### 14.3 Neon size and the year-one projection
+
+| | `pg_database_size` |
+|---|---|
+| before (2026-10-23 ~21:15Z, after C2–C5) | 74,907,648 B (74.9 MB) |
+| after 0003 + archive + prune + `VACUUM FULL` | 74,219,520 B (74.2 MB) |
+
+The immediate saving is small (the snapshot table held only 5,568 rows); the fixes change the
+growth rate. Year one, 7 model names × 24 × 8,760 = 1.47 M prediction rows; the §4.4 90-day prune
+of `seasonal_naive_24`, `persistence` and `prev_champion` keeps ≈ 1.00 M of them:
+
+| | MB, year one |
+|---|---:|
+| today (demand, actuals, weather, rest) | 74 |
+| demand + actuals + weather growth | 7 |
+| predictions, 0003 layout (1.00 M × 96.2 B) | 96 (was 259) |
+| ieso_forecast_snapshots with retention | 105 (was 220) |
+| **scores, 0001 layout** (1.47 M × 198.7 B; §4.4 prunes predictions only) | **292** |
+| **total** | **574 MB — still over 500** |
+
+**Open for C11 (flagged):** `scores` is now the largest item and is still empty. The same treatment
+before its first row (`real` errors, `model_id`/`version_id`, drop the derivable `target_time`,
+`actual_mw`, `abs_pct_err`, `actual_source`; PK `(issue_time, model_id, horizon)`) should bring it
+to ≈ 100 B/row ≈ 147 MB, or ≈ 100 MB if the 90-day prune also covers the scores of the three weak
+names (their `score_daily` aggregates stay). With that: ≈ 74 + 7 + 96 + 105 + 100–147 ≈ 380–430 MB.
+The `ieso_forecast_snapshots` row (222 B: `source_file` text duplicated by the ledger, `numeric`
+MW) could shrink the same way, to ≈ 35 MB/year. `zonal_actuals` (Phase D, ~40 MB) comes on top.

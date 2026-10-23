@@ -8,9 +8,18 @@ Source facts (docs/DATA_NOTES.md §3, plan §3.0 decision 3):
 - Every version is a snapshot; the benchmark for an issue time is the latest snapshot created at
   or before its data cutoff, whatever its age.
 
-Raw XML is archived gzipped under `<archive_root>/ieso/adequacy3/YYYY/MM/DD/<file>.xml.gz` (DD =
-delivery date). No object store exists yet (P0.2), so the root is a local, git-ignored directory
-(`data/raw/`) until the bucket is set up; a one-off copy moves it there later (plan §3.2).
+Raw XML is archived gzipped, keyed `raw/ieso/adequacy3/YYYY/MM/DD/<file>.xml.gz` (DD = delivery
+date), in the private bucket when an object store is passed, else under a local, git-ignored root
+(`<archive_root>/ieso/adequacy3/...`). `scripts/copy_archive_fallback.py` moves a local archive to
+the bucket.
+
+Every file read is recorded in `ieso_adequacy_files` (migration 0003); the listing is compared
+with that ledger, so a version whose rows were pruned is not downloaded again.
+
+Retention (`prune_snapshots`, DATA_NOTES §15): for delivery date D keep every version created at or
+after (D - 2 days) 00:00 EST, plus the newest version created before that. Issue times whose 24
+targets touch D start at D-1 00:00 EST, so the benchmark (latest snapshot <= data_cutoff) is
+always among the kept versions.
 """
 
 from __future__ import annotations
@@ -28,6 +37,7 @@ from sqlalchemy import Engine, text
 
 from gridcast import contracts
 from gridcast.ingest.http import EmptyFeedError, Fetched, list_directory
+from gridcast.storage.objstore import ObjectStore
 from gridcast.timeutil import EST, he_to_utc
 
 BASE_URL = "https://reports-public.ieso.ca/public/Adequacy3/"
@@ -83,8 +93,16 @@ def parse_adequacy(xml: str | bytes) -> Snapshot:
     return Snapshot(parse_created_at(created), d, rows)
 
 
+ARCHIVE_PREFIX = "raw/ieso/adequacy3/"
+RETENTION_DAYS = 2
+
+
 def archive_path(root: Path, file_name: str, delivery_date: date) -> Path:
     return root / "ieso" / "adequacy3" / f"{delivery_date:%Y/%m/%d}" / f"{file_name}.gz"
+
+
+def archive_key(file_name: str, delivery_date: date) -> str:
+    return f"{ARCHIVE_PREFIX}{delivery_date:%Y/%m/%d}/{file_name}.gz"
 
 
 def pending_files(
@@ -100,7 +118,13 @@ def pending_files(
     return [name for _, name in sorted(found)]
 
 
-def store_snapshot(engine: Engine, snap: Snapshot, file_name: str, fetched_at: datetime) -> int:
+def store_snapshot(
+    engine: Engine,
+    snap: Snapshot,
+    file_name: str,
+    fetched_at: datetime,
+    archived_as: str | None = None,
+) -> int:
     parsed = parse_file_name(file_name)
     if parsed is None:
         raise ValueError(f"not a versioned Adequacy3 file: {file_name!r}")
@@ -128,6 +152,21 @@ def store_snapshot(engine: Engine, snap: Snapshot, file_name: str, fetched_at: d
             ),
             params,
         )
+        conn.execute(
+            text(
+                "INSERT INTO ieso_adequacy_files (source_file, delivery_date, version, created_at,"
+                " fetched_at, archive_key) VALUES (:f, :d, :v, :c, :t, :k)"
+                " ON CONFLICT (source_file) DO NOTHING"
+            ),
+            {
+                "f": file_name,
+                "d": snap.delivery_date,
+                "v": parsed[1],
+                "c": snap.created_at,
+                "t": fetched_at,
+                "k": archived_as,
+            },
+        )
     return int(result.rowcount or 0)
 
 
@@ -138,10 +177,12 @@ def ingest_recent(
     days_ahead: int = 2,
     max_files: int = MAX_FILES_PER_RUN,
     archive_root: Path | None = DEFAULT_ARCHIVE_ROOT,
+    store: ObjectStore | None = None,
 ) -> dict[str, int]:
-    """Store every not-yet-stored version for delivery dates today .. today + days_ahead (EST).
+    """Store every not-yet-read version for delivery dates today .. today + days_ahead (EST).
 
-    Returns counts: listed, pending, files, rows.
+    The raw XML goes to `store` when given, else under `archive_root`. Returns counts: listed,
+    pending, files, rows, pruned.
     """
     dates = [today_est + timedelta(days=k) for k in range(days_ahead + 1)]
     listing = fetch(BASE_URL)
@@ -153,8 +194,7 @@ def ingest_recent(
             r[0]
             for r in conn.execute(
                 text(
-                    "SELECT DISTINCT source_file FROM ieso_forecast_snapshots"
-                    " WHERE delivery_date = ANY(:dates)"
+                    "SELECT source_file FROM ieso_adequacy_files WHERE delivery_date = ANY(:dates)"
                 ),
                 {"dates": dates},
             )
@@ -169,15 +209,59 @@ def ingest_recent(
             continue  # listed but gone or not yet readable; the next slot retries
         snap = parse_adequacy(fetched.text.encode("utf-8"))
         contracts.validate_ieso_snapshot(snap.created_at, snap.rows, fetched.fetched_at)
-        if archive_root is not None:
+        body = gzip.compress(fetched.text.encode("utf-8"), mtime=0)
+        archived_as: str | None = None
+        if store is not None:
+            archived_as = archive_key(name, snap.delivery_date)
+            store.put_bytes(archived_as, body, "application/gzip")
+        elif archive_root is not None:
             path = archive_path(archive_root, name, snap.delivery_date)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(gzip.compress(fetched.text.encode("utf-8")))
-        counts["rows"] += store_snapshot(engine, snap, name, fetched.fetched_at)
+            path.write_bytes(body)
+        counts["rows"] += store_snapshot(engine, snap, name, fetched.fetched_at, archived_as)
         counts["files"] += 1
         newest = max(newest, snap.created_at) if newest else snap.created_at
         last_fetch = fetched.fetched_at
     if newest is not None and last_fetch is not None and len(todo) <= max_files:
         # All pending versions were read, so the newest one IESO lists is among them.
         contracts.check_newest_snapshot(newest, last_fetch)
+    counts["pruned"] = prune_snapshots(engine)["rows_deleted"]
     return counts
+
+
+# Cutoff = (delivery_date - RETENTION_DAYS) 00:00 EST, as UTC.
+_PRUNE_SQL = """
+WITH cut AS (
+  SELECT delivery_date,
+         ((delivery_date - CAST(:days AS integer))::timestamp + interval '5 hours')
+           AT TIME ZONE 'UTC' AS cutoff
+  FROM (SELECT DISTINCT delivery_date FROM ieso_forecast_snapshots) d
+), newest_old AS (
+  SELECT s.delivery_date, max(s.created_at) AS created_at
+  FROM ieso_forecast_snapshots s JOIN cut USING (delivery_date)
+  WHERE s.created_at < cut.cutoff
+  GROUP BY s.delivery_date
+), gone AS (
+  DELETE FROM ieso_forecast_snapshots s
+  USING newest_old k
+  WHERE s.delivery_date = k.delivery_date AND s.created_at < k.created_at
+  RETURNING s.source_file
+)
+SELECT source_file, count(*) FROM gone GROUP BY source_file
+"""
+
+
+def prune_snapshots(engine: Engine) -> dict[str, int]:
+    """Apply the retention rule (module docstring); mark pruned files in the ledger."""
+    with engine.begin() as conn:
+        gone = conn.execute(text(_PRUNE_SQL), {"days": RETENTION_DAYS}).all()
+        files = [r[0] for r in gone]
+        if files:
+            conn.execute(
+                text(
+                    "UPDATE ieso_adequacy_files SET rows_kept = false"
+                    " WHERE source_file = ANY(:files)"
+                ),
+                {"files": files},
+            )
+    return {"files_pruned": len(files), "rows_deleted": int(sum(r[1] for r in gone))}
