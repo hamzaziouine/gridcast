@@ -59,7 +59,11 @@ $body$
 """
 
 UPGRADE_SQL: list[str] = [
-    # 3.1 raw demand, versioned and append-only
+    # 3.1 raw demand, versioned and append-only.
+    # Plan §3.0 decision 1: RealtimeTotals carries Market Demand only (hourly mean of TOTAL
+    # ENERGY, complete 12-interval hours), never Ontario Demand. So ontario_demand_mw is required
+    # for pub_demand rows and must be NULL for realtime_totals rows; market_demand_mw is the
+    # Market Demand feature series from both sources.
     """
     CREATE TABLE raw_demand_history (
       target_time        timestamptz NOT NULL,
@@ -69,14 +73,19 @@ UPGRADE_SQL: list[str] = [
       local_date         date        NOT NULL,
       hour_ending        smallint    NOT NULL CHECK (hour_ending BETWEEN 1 AND 24),
       market_demand_mw   numeric(9,2),
-      ontario_demand_mw  numeric(9,2) NOT NULL,
+      ontario_demand_mw  numeric(9,2),
       n_intervals        smallint,
       available_at       timestamptz NOT NULL,
       available_at_kind  text        NOT NULL CHECK (available_at_kind IN ('observed','modelled')),
       fetched_at         timestamptz NOT NULL,
       http_last_modified timestamptz,
       ingested_at        timestamptz NOT NULL DEFAULT now(),
-      PRIMARY KEY (target_time, source, file_name)
+      PRIMARY KEY (target_time, source, file_name),
+      CONSTRAINT ck_raw_demand_history_source_columns CHECK (
+        (source = 'pub_demand' AND ontario_demand_mw IS NOT NULL)
+        OR (source = 'realtime_totals' AND ontario_demand_mw IS NULL
+            AND market_demand_mw IS NOT NULL AND n_intervals = 12)
+      )
     )
     """,
     "CREATE INDEX ix_raw_demand_history_target_available"
@@ -88,12 +97,13 @@ UPGRADE_SQL: list[str] = [
     FROM raw_demand_history
     ORDER BY target_time, source, available_at DESC
     """,
-    # 3.2 actuals = latest truth for scoring only
+    # 3.2 actuals = latest truth for scoring only. Plan §3.0 decision 1: provisional (realtime)
+    # scoring is dropped, so the only actual source is PUB_Demand Ontario Demand.
     """
     CREATE TABLE actuals (
       target_time       timestamptz PRIMARY KEY,
       ontario_demand_mw numeric(9,2) NOT NULL,
-      source            text NOT NULL,
+      source            text NOT NULL DEFAULT 'pub_demand' CHECK (source = 'pub_demand'),
       revision          integer NOT NULL DEFAULT 1,
       available_at      timestamptz NOT NULL,
       available_at_kind text NOT NULL CHECK (available_at_kind IN ('observed','modelled')),
@@ -171,7 +181,7 @@ UPGRADE_SQL: list[str] = [
       run_id             uuid        NOT NULL,
       run_kind           text        NOT NULL DEFAULT 'scheduled'
                          CHECK (run_kind IN ('scheduled','catchup','manual')),
-      ieso_staleness_min integer,
+      ieso_staleness_min integer,  -- ieso_adequacy rows: issue_time - snapshot created_at, minutes
       created_at         timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY (issue_time, target_time, model_name)
     )
@@ -187,7 +197,8 @@ UPGRADE_SQL: list[str] = [
       model_name      text        NOT NULL,
       model_version   text        NOT NULL,
       actual_mw       numeric(9,2) NOT NULL,
-      actual_source   text        NOT NULL,
+      actual_source   text        NOT NULL DEFAULT 'pub_demand'
+                      CHECK (actual_source = 'pub_demand'),
       actual_revision integer     NOT NULL,
       err_mw          numeric(9,2) NOT NULL,
       abs_pct_err     numeric(8,5) NOT NULL,

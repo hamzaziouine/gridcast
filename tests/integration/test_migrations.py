@@ -155,6 +155,48 @@ def test_zonal_share_is_generated(migrated_url: str) -> None:
     engine.dispose()
 
 
+@pytest.mark.parametrize(
+    ("source", "market", "ontario", "n_intervals", "ok"),
+    [
+        ("pub_demand", 16000, 15000, None, True),
+        ("pub_demand", 16000, None, None, False),  # PUB rows must carry Ontario Demand
+        ("realtime_totals", 16000, None, 12, True),  # Market Demand only (plan §3.0 decision 1)
+        ("realtime_totals", 16000, 15000, 12, False),  # RealtimeTotals has no Ontario Demand
+        ("realtime_totals", 16000, None, 11, False),  # partial hour
+        ("realtime_totals", None, None, 12, False),
+    ],
+)
+def test_raw_demand_history_source_columns(
+    migrated_url: str,
+    source: str,
+    market: int | None,
+    ontario: int | None,
+    n_intervals: int | None,
+    ok: bool,
+) -> None:
+    engine = db.make_engine(migrated_url)
+    insert = text(
+        "INSERT INTO raw_demand_history (target_time, source, file_name, local_date, hour_ending,"
+        " market_demand_mw, ontario_demand_mw, n_intervals, available_at, available_at_kind,"
+        " fetched_at) VALUES (now(), :source, :file, '2026-10-22', 1, :market, :ontario, :n,"
+        " now(), 'observed', now())"
+    )
+    params = {
+        "source": source,
+        "file": f"f-{uuid.uuid4().hex}",
+        "market": market,
+        "ontario": ontario,
+        "n": n_intervals,
+    }
+    if ok:
+        with engine.begin() as conn:
+            conn.execute(insert, params)
+    else:
+        with pytest.raises(IntegrityError), engine.begin() as conn:
+            conn.execute(insert, params)
+    engine.dispose()
+
+
 def test_cli_db_ping_and_upgrade(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", migrated_url)
     monkeypatch.delenv("DATABASE_URL_DIRECT", raising=False)
