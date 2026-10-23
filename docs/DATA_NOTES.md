@@ -660,3 +660,43 @@ is flagged for C9/C10 (see the Day-2 report): the §4.4 levers alone do not keep
 - In the historical archive, `shortwave_radiation`, `precipitation` and `snowfall` are null for
   2018-01-01T00:00Z in every city (accumulated variables start one hour later); everything else is
   non-null.
+
+---
+
+## 10. C4 — live RealtimeTotals and Adequacy3 ingest (2026-10-23 20:42Z)
+
+`gridcast ingest realtime --lookback 24` and `gridcast ingest adequacy --max-files 400` were run
+once against Neon.
+
+**RealtimeTotals:** `due=24 stored_before=0 fetched=23 inserted=22 missing=1 partial=1`.
+22 complete hours stored (2026-10-22 20:00Z … 2026-10-23 19:00Z) as `observed`, Market Demand only.
+- The 9 hours that overlap `PUB_Demand` (2026-10-22 HE16–24) match its Market Demand within
+  **0.43 MW** (rounding of the 12-interval mean), confirming plan §3.0 decision 1.
+- 2026-10-23 **HE11 is still partial (2 intervals) and HE12 still 404 at 20:42Z**, ~10.5 h after
+  the outage. Neither was back-filled during the day. So far this supports keeping
+  `REALTIME_LAG_H = 1` (the fallback-to-2 trigger was a late back-fill); the 25 h cadence
+  observation still decides it. The ingest skips both without failing (plan §3.0 decision 6).
+
+**Adequacy3:** `listed=5551 pending=232 files=232 rows=5568` in 12 min 39 s (~3.3 s per file,
+mostly the per-file round trips to Neon).
+
+| delivery date | versions stored | first `created_at` (UTC) | newest `created_at` (UTC) |
+|---|---:|---|---|
+| 2026-10-23 | 99 (v1–v99) | 2026-09-19 13:57:09 | 2026-10-23 20:35:02 |
+| 2026-10-24 | 68 | 2026-09-20 13:57:36 | 2026-10-23 17:53:16 |
+| 2026-10-25 | 65 | 2026-09-21 13:58:46 | 2026-10-23 20:35:03 |
+
+- `CreatedAt` parsed as fixed EST: the newest 2026-10-23 version, `CreatedAt 15:35:02`, is stored
+  as 20:35:02Z, a few minutes before our 20:4xZ fetch, as expected.
+- The raw XML of all 232 versions is archived gzipped under the git-ignored
+  `data/raw/ieso/adequacy3/YYYY/MM/DD/` (2.1 MB). **No object store exists yet** (P0.2 is still
+  open), so this local directory is the archive until the bucket exists; the plan's one-off copy
+  script moves it there.
+
+**Storage warning for C10.** `ieso_forecast_snapshots` measures **210 B/row** on Neon (1,144 kB
+for 5,568 rows). A delivery date enters the today..today+2 window with its whole history of
+versions (~65 issued over the previous month) and collects ~50 more on D−1/D, so the hourly job
+stores ~120 versions × 24 rows per delivery date: ≈ 1.05 M rows ≈ **220 MB per year**. That is not
+in the §4.4 budget. A version created before D−2 00:00 EST is never the latest snapshot at any
+issue time whose 24 targets touch D, except the single newest one of them; storing only those
+(plus the newest older one) roughly halves this. Decision left to C10/the orchestrator.

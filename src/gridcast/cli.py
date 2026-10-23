@@ -1,8 +1,13 @@
 """GridCast command-line interface (Typer)."""
 
+from datetime import UTC, datetime
+from pathlib import Path
+
 import typer
+from sqlalchemy import Engine
 
 from gridcast import __version__, db
+from gridcast.timeutil import est_date
 
 app = typer.Typer(
     name="gridcast",
@@ -11,6 +16,8 @@ app = typer.Typer(
 )
 db_app = typer.Typer(help="Database: migrations and connectivity.", no_args_is_help=True)
 app.add_typer(db_app, name="db")
+ingest_app = typer.Typer(help="Ingest live IESO files.", no_args_is_help=True)
+app.add_typer(ingest_app, name="ingest")
 
 
 @app.callback()
@@ -54,6 +61,53 @@ def db_ping(
     finally:
         engine.dispose()
     typer.echo(f"ok: {version}")
+
+
+def _jobs_engine() -> Engine:
+    try:
+        return db.make_engine(db.jobs_url())
+    except db.DatabaseNotConfiguredError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+
+@ingest_app.command("realtime")
+def ingest_realtime(
+    lookback: int = typer.Option(6, help="Hours to look back for complete, unstored hours."),
+) -> None:
+    """RealtimeTotals: store complete hours of Market Demand (observed stamps)."""
+    from gridcast.ingest import http, ieso_realtime
+
+    engine = _jobs_engine()
+    try:
+        counts = ieso_realtime.ingest_recent(engine, http.fetch, datetime.now(UTC), lookback)
+    finally:
+        engine.dispose()
+    typer.echo(" ".join(f"{k}={v}" for k, v in counts.items()))
+
+
+@ingest_app.command("adequacy")
+def ingest_adequacy(
+    max_files: int = typer.Option(20, help="Cap on files downloaded this run (plan §6.1 step 0)."),
+    days_ahead: int = typer.Option(2, help="Delivery dates today .. today + N (EST)."),
+    archive_root: str = typer.Option("data/raw", help="Local raw-XML archive root."),
+) -> None:
+    """Adequacy3: store every not-yet-stored version for the next delivery dates."""
+    from gridcast.ingest import http, ieso_adequacy
+
+    engine = _jobs_engine()
+    try:
+        counts = ieso_adequacy.ingest_recent(
+            engine,
+            http.fetch,
+            est_date(datetime.now(UTC)),
+            days_ahead=days_ahead,
+            max_files=max_files,
+            archive_root=Path(archive_root),
+        )
+    finally:
+        engine.dispose()
+    typer.echo(" ".join(f"{k}={v}" for k, v in counts.items()))
 
 
 if __name__ == "__main__":
