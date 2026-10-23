@@ -18,6 +18,8 @@ db_app = typer.Typer(help="Database: migrations and connectivity.", no_args_is_h
 app.add_typer(db_app, name="db")
 ingest_app = typer.Typer(help="Ingest live IESO files.", no_args_is_help=True)
 app.add_typer(ingest_app, name="ingest")
+prune_app = typer.Typer(help="Storage hygiene (retention rules).", no_args_is_help=True)
+app.add_typer(prune_app, name="prune")
 
 
 @app.callback()
@@ -90,11 +92,15 @@ def ingest_realtime(
 def ingest_adequacy(
     max_files: int = typer.Option(20, help="Cap on files downloaded this run (plan §6.1 step 0)."),
     days_ahead: int = typer.Option(2, help="Delivery dates today .. today + N (EST)."),
-    archive_root: str = typer.Option("data/raw", help="Local raw-XML archive root."),
+    archive_root: str = typer.Option(
+        "data/raw", help="Local raw-XML archive root, used only when no object store is set."
+    ),
 ) -> None:
-    """Adequacy3: store every not-yet-stored version for the next delivery dates."""
+    """Adequacy3: store every not-yet-read version for the next delivery dates, then prune."""
     from gridcast.ingest import http, ieso_adequacy
+    from gridcast.storage import objstore
 
+    store = objstore.private_store() if objstore.configured() else None
     engine = _jobs_engine()
     try:
         counts = ieso_adequacy.ingest_recent(
@@ -104,6 +110,7 @@ def ingest_adequacy(
             days_ahead=days_ahead,
             max_files=max_files,
             archive_root=Path(archive_root),
+            store=store,
         )
     finally:
         engine.dispose()
@@ -135,6 +142,36 @@ def backtest(
     typer.echo(res.lag_parity.to_string(index=False))
     typer.echo(res.summary().round(3).T.to_string())
     typer.echo(res.per_fold().round(2).to_string())
+
+
+@prune_app.command("adequacy")
+def prune_adequacy(
+    vacuum_full: bool = typer.Option(
+        False, "--vacuum-full", help="Then VACUUM FULL the table over DATABASE_URL_DIRECT."
+    ),
+) -> None:
+    """Adequacy3 retention: keep versions created >= D-2 00:00 EST plus the newest older one."""
+    from sqlalchemy import text
+
+    from gridcast.ingest import ieso_adequacy
+
+    engine = _jobs_engine()
+    try:
+        out = ieso_adequacy.prune_snapshots(engine)
+    finally:
+        engine.dispose()
+    typer.echo(" ".join(f"{k}={v}" for k, v in out.items()))
+    if vacuum_full:
+        direct = db.make_engine(db.migration_url(), isolation_level="AUTOCOMMIT")
+        try:
+            with direct.connect() as conn:
+                conn.execute(text("VACUUM FULL ANALYZE ieso_forecast_snapshots"))
+                size = conn.execute(
+                    text("SELECT pg_total_relation_size('ieso_forecast_snapshots')")
+                ).scalar_one()
+        finally:
+            direct.dispose()
+        typer.echo(f"vacuum full done; ieso_forecast_snapshots = {size} bytes")
 
 
 if __name__ == "__main__":
