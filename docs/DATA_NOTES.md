@@ -648,6 +648,26 @@ total stays above 60 %, and `scores` (similar row count, not measured yet) comes
 is flagged for C9/C10 (see the Day-2 report): the §4.4 levers alone do not keep year one under
 0.5 GB.
 
+### 9.0 Backfill result (2026-10-23, run started ~20:31Z)
+
+`scripts/backfill_weather.py`: 106 monthly requests (6 cities each), all succeeded (retries are not logged).
+
+```
+2018-01: hours=744 written=744
+...
+2026-10: hours=528 written=528
+written this run: 77208
+weather_hourly rows: 77208 (2018-01-01 00:00:00+00:00 .. 2026-10-22 23:00:00+00:00), size 25 MB
+pg_database_size: 74153984 bytes (74.2 MB)
+```
+
+- 77,208 rows = 3,217 days × 24: **no gaps**. 18 null values in total, all at
+  2018-01-01T00:00Z (3 accumulated variables × 6 cities).
+- The `WeatherHourly` contract (C5) passes on the whole Neon table.
+- `v_training_base` returns 77,207 rows, each with `weather_available_at` (the only weather hour
+  without an actual is the 2025-05-01 HE1 gap).
+- Measured 25 MB on Neon, against the 27 MB local estimate.
+
 ### 9.1 Open-Meteo facts seen live while building C3
 
 - With a single `models=gfs_seamless`, the response keys are the plain variable names (no model
@@ -700,3 +720,22 @@ stores ~120 versions × 24 rows per delivery date: ≈ 1.05 M rows ≈ **220 MB 
 in the §4.4 budget. A version created before D−2 00:00 EST is never the latest snapshot at any
 issue time whose 24 targets touch D, except the single newest one of them; storing only those
 (plus the newest older one) roughly halves this. Decision left to C10/the orchestrator.
+
+---
+
+## 11. C5 — data contracts (pandera)
+
+`src/gridcast/contracts/__init__.py`. Each ingest path validates its frame before it opens a
+write transaction, so a failure writes nothing (integration test
+`test_contract_failure_writes_nothing`).
+
+| Contract | Used in | Main rules |
+|---|---|---|
+| `RawDemand` | `ieso_demand.ingest_pub_demand`, `ieso_realtime.ingest_recent` | `target_time` UTC, on the hour, `= he_to_utc(local_date, hour_ending)`; Ontario 5–30 GW, Market 5–35 GW; PUB rows carry both, realtime rows carry Market only with `n_intervals = 12`; `available_at ≤ fetched_at + 5 min`; unique `(target_time, source, file_name)` |
+| `WeatherHourly` | `openmeteo.backfill` | 54 value columns in physical ranges, nullable; historical rows have `available_at = valid_time − 24 h`; unique hourly `valid_time` |
+| `WeatherFrame` + span | `openmeteo.fetch_live` (`validate_weather_snapshot`) | ≤ 5 % nulls; covers `[issue − 24 h, issue + 47 h]` hourly, `issue = floor(fetched_at)` |
+| `IesoSnapshot` | `ieso_adequacy.ingest_recent` | 24 hourly rows, 5–30 GW; `created_at ≤ fetched_at + 5 min`; after a run that read every pending version, the newest `created_at ≥ fetched_at − 3 days` |
+
+Verified on real data: the PUB_Demand backfill re-run with contracts active (all 12 yearly files
+pass, 0 rows inserted), the whole `weather_hourly` table, and live `gridcast ingest realtime` /
+`ingest adequacy` runs at 21:02Z.

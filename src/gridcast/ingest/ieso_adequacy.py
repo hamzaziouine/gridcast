@@ -26,6 +26,7 @@ import defusedxml.ElementTree as ET  # noqa: N817 - the conventional alias
 import pandas as pd
 from sqlalchemy import Engine, text
 
+from gridcast import contracts
 from gridcast.ingest.http import EmptyFeedError, Fetched, list_directory
 from gridcast.timeutil import EST, he_to_utc
 
@@ -160,15 +161,23 @@ def ingest_recent(
         }
     todo = pending_files(names, dates, stored)
     counts = {"listed": len(names), "pending": len(todo), "files": 0, "rows": 0}
+    newest: datetime | None = None
+    last_fetch: datetime | None = None
     for name in todo[:max_files]:
         fetched = fetch(BASE_URL + name)
         if fetched.status != 200:
             continue  # listed but gone or not yet readable; the next slot retries
         snap = parse_adequacy(fetched.text.encode("utf-8"))
+        contracts.validate_ieso_snapshot(snap.created_at, snap.rows, fetched.fetched_at)
         if archive_root is not None:
             path = archive_path(archive_root, name, snap.delivery_date)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(gzip.compress(fetched.text.encode("utf-8")))
         counts["rows"] += store_snapshot(engine, snap, name, fetched.fetched_at)
         counts["files"] += 1
+        newest = max(newest, snap.created_at) if newest else snap.created_at
+        last_fetch = fetched.fetched_at
+    if newest is not None and last_fetch is not None and len(todo) <= max_files:
+        # All pending versions were read, so the newest one IESO lists is among them.
+        contracts.check_newest_snapshot(newest, last_fetch)
     return counts

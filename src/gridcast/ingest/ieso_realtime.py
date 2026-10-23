@@ -23,6 +23,7 @@ from datetime import date, datetime
 import pandas as pd
 from sqlalchemy import Engine, text
 
+from gridcast import contracts
 from gridcast.config import REALTIME_LAG_H
 from gridcast.ingest.availability import realtime_totals_available_at
 from gridcast.ingest.http import EmptyFeedError, Fetched
@@ -174,6 +175,7 @@ def ingest_recent(
         if rows.empty:
             counts["partial"] += 1
             continue
+        contracts.RawDemand.validate(rows)
         with engine.begin() as conn:
             counts["inserted"] += len(append_raw_demand(conn, rows))
     return counts

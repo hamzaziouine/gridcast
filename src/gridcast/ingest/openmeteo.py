@@ -17,15 +17,16 @@ import json
 import time
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pandas as pd
 from sqlalchemy import Connection, Engine, text
 
+from gridcast import contracts
 from gridcast.ingest.availability import historical_forecast_available_at
 from gridcast.ingest.http import Fetched
+from gridcast.weather import CITIES, VARIABLES, WEATHER_COLUMNS
 
 HISTORICAL_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -35,37 +36,6 @@ LIVE_PAST_HOURS = 24
 LIVE_FORECAST_HOURS = 48
 
 
-@dataclass(frozen=True)
-class City:
-    location_id: int
-    name: str
-    key: str
-    lat: float
-    lon: float
-    weight: float
-
-
-# Must match the weather_locations seed in alembic 0002 (a test checks it).
-CITIES: tuple[City, ...] = (
-    City(1, "Toronto", "toronto", 43.65, -79.38, 0.45),
-    City(2, "Ottawa", "ottawa", 45.42, -75.70, 0.15),
-    City(3, "London", "london", 42.98, -81.25, 0.10),
-    City(4, "Windsor", "windsor", 42.30, -83.02, 0.08),
-    City(5, "Sudbury", "sudbury", 46.49, -80.99, 0.07),
-    City(6, "Thunder Bay", "thunder_bay", 48.38, -89.25, 0.05),
-)
-VARIABLES: tuple[str, ...] = (
-    "temperature_2m",
-    "apparent_temperature",
-    "relative_humidity_2m",
-    "dew_point_2m",
-    "wind_speed_10m",
-    "cloud_cover",
-    "shortwave_radiation",
-    "precipitation",
-    "snowfall",
-)
-WEATHER_COLUMNS: tuple[str, ...] = tuple(f"{v}_{c.key}" for c in CITIES for v in VARIABLES)
 ROW_COLUMNS: tuple[str, ...] = (
     "valid_time",
     "source",
@@ -244,7 +214,7 @@ def backfill(
         if fetched.status != 200:
             raise RuntimeError(f"historical forecast {first:%Y-%m}: HTTP {fetched.status}")
         frame = parse_response(json.loads(fetched.text))
-        rows = to_rows(frame, fetched.fetched_at)
+        rows = contracts.WeatherHourly.validate(to_rows(frame, fetched.fetched_at))
         with engine.begin() as conn:
             n = upsert_weather(conn, rows)
         total += n
@@ -261,4 +231,6 @@ def fetch_live(fetch: Fetch) -> tuple[pd.DataFrame, datetime]:
     fetched = fetch(FORECAST_URL, params)
     if fetched.status != 200:
         raise RuntimeError(f"live forecast: HTTP {fetched.status}")
-    return parse_response(json.loads(fetched.text)), fetched.fetched_at
+    frame = parse_response(json.loads(fetched.text))
+    contracts.validate_weather_snapshot(frame, fetched.fetched_at)
+    return frame, fetched.fetched_at

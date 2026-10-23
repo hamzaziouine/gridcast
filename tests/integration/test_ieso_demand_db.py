@@ -112,3 +112,18 @@ def test_observed_mode_and_view(engine: Engine) -> None:
         ).scalar_one()
     assert (float(latest[0]), latest[1]) == (14161.0, "PUB_Demand.csv")
     assert rev == 3
+
+
+def test_contract_failure_writes_nothing(engine: Engine) -> None:
+    import pandera.errors
+
+    # Market Demand 17 MW instead of 17,265: a unit or parsing error the contract must stop.
+    broken = FIXTURE.replace("2026-10-17,1,17265,13989", "2026-10-17,1,17.265,13989")
+    with engine.connect() as conn:
+        before = conn.execute(text("SELECT count(*) FROM raw_demand_history")).scalar_one()
+    t = datetime(2026, 10, 26, 13, 20, tzinfo=UTC)
+    with pytest.raises((pandera.errors.SchemaError, pandera.errors.SchemaErrors)):
+        d.ingest_pub_demand(engine, _fetched(broken, "PUB_Demand_2026_v298.csv", t), "observed")
+    with engine.connect() as conn:
+        after = conn.execute(text("SELECT count(*) FROM raw_demand_history")).scalar_one()
+    assert after == before
