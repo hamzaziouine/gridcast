@@ -119,10 +119,11 @@ def ingest_adequacy(
 
 @app.command()
 def backtest(
-    lgbm: bool = typer.Option(False, "--lgbm/--no-lgbm", help="Include LightGBM (C8)."),
+    lgbm: bool = typer.Option(True, "--lgbm/--no-lgbm", help="Include LightGBM (slow)."),
     month: list[str] = typer.Option(  # noqa: B008 - Typer's documented pattern
         [], help="Fold month YYYY-MM (repeatable); default: the last 12 complete months."
     ),
+    mlflow: bool = typer.Option(False, "--mlflow/--no-mlflow", help="Log the run to MLflow."),
 ) -> None:
     """Rolling-origin backtest (12 monthly folds) of the baselines and LightGBM; prints tables."""
     from datetime import date
@@ -142,6 +143,13 @@ def backtest(
     typer.echo(res.lag_parity.to_string(index=False))
     typer.echo(res.summary().round(3).T.to_string())
     typer.echo(res.per_fold().round(2).to_string())
+    if mlflow and lgbm:
+        from gridcast.backtest.harness import headline
+        from gridcast.registry import mlflow_client
+
+        with mlflow_client.start_run("gridcast-backtest", "backtest"):
+            mlflow_client.log({"folds": ",".join(f.month.isoformat() for f in res.folds)},
+                              headline(res), {})  # fmt: skip
 
 
 @prune_app.command("adequacy")
