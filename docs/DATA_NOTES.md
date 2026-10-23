@@ -739,3 +739,48 @@ write transaction, so a failure writes nothing (integration test
 Verified on real data: the PUB_Demand backfill re-run with contracts active (all 12 yearly files
 pass, 0 rows inserted), the whole `weather_hourly` table, and live `gridcast ingest realtime` /
 `ingest adequacy` runs at 21:02Z.
+
+---
+
+## 12. C6 — feature builder v1 (2026-10-23)
+
+`src/gridcast/features/` (`build.py`, `calendar.py`, `schema.py`), `FEATURE_SCHEMA_VERSION = 1`,
+96 feature columns: horizon, 13 calendar, 11 issue-level demand, 3 target-level demand lags,
+54 per-city weather, 14 weather aggregates.
+
+**Availability rules as built** (one code path for training, backtest and live):
+
+| Input | `available_at` used by the as-of filter |
+|---|---|
+| Ontario Demand (`ont_*`, baselines) | the PUB row stamp: modelled `D+1 13:00Z` (backfill) or observed (live, revisions) |
+| Market Demand, first PUB version of an hour (`mkt_*`) | `availability.market_demand_available_at` = target + `REALTIME_LAG_H` (1 h) |
+| Market Demand, PUB revision | its own (observed) row stamp |
+| Market Demand, RealtimeTotals row | observed stamp (modelled rows: target + `REALTIME_LAG_H`) |
+| Weather | not filtered: the frame handed in (historical store `valid_time − 24 h`, or one live snapshot `fetched_at`) is checked row by row |
+
+For each hour the newest version with `available_at ≤ data_cutoff` wins. `L0` = Market Demand at
+`issue_time − REALTIME_LAG_H`; live, if that hour is missing, the newest Market hour of the
+5 before it is used and `mkt_l0_age_h` records the age. `ont_last` = newest visible Ontario hour
+(8–32 h old under the PUB rule), with `ont_last_age_h`.
+
+**Leakage tripwire.** Each feature row carries `input_available_at` (max over every input row it
+read). `assert_asof` raises `LeakageError` if it exceeds `issue_time + 30 min`. It is independent of
+the selection code: the unit tests show that a weather row stamped `cutoff + 1 min` raises, and that
+a demand row stamped `cutoff + 1 min` is ignored by the correct selection (L0 falls back one hour)
+but raises as soon as the as-of mask is replaced by one that ignores the cutoff.
+
+**Done-when output (Neon, 2026-10-23):**
+
+```
+build(2025-06-15 12:00Z): rows=24 features=96 null_feature_cells=1 L0_lag_h={1.0} ont_last_age_h=32 max(input_available_at)=2025-06-15 12:00:00+00:00 <= cutoff 2025-06-15 12:30:00+00:00
+build(2023-01-10 03:00Z): rows=24 features=96 null_feature_cells=1 L0_lag_h={1.0} ont_last_age_h=23 max(input_available_at)=2023-01-10 03:00:00+00:00 <= cutoff 2023-01-10 03:30:00+00:00
+```
+
+The one null cell is `mkt_lag24` at h = 24 (target − 24 h = issue_time, not yet available), by design.
+
+**Live fact: the Civic Holiday is not in the `holidays` package's public calendar.**
+`holidays.country_holidays("CA", subdiv="ON")` (v0.107) lists New Year's, Family Day, Good Friday,
+Victoria Day, Canada Day, Labour Day, Thanksgiving, Christmas and Boxing Day only. The Civic
+Holiday (first Monday of August) is under its *optional* category, together with Easter Monday and
+Remembrance Day. Plan §3.5 counts the Civic Holiday, so `features/calendar.py` adds it from the
+optional category and leaves the other two out (not widely observed in Ontario).
