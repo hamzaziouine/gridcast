@@ -59,6 +59,10 @@ jobs:
       - name: Pytest (unit + integration)
         run: uv run pytest
 
+      - name: Worker tests (node:test, fake R2 binding; no install needed)
+        working-directory: infra/worker
+        run: node --test
+
       - name: Every workflow secret/var is listed in .env.example
         run: |
           missing=0
