@@ -23,6 +23,8 @@ prune_app = typer.Typer(help="Storage hygiene (retention rules).", no_args_is_he
 app.add_typer(prune_app, name="prune")
 run_app = typer.Typer(help="Scheduled jobs (what the GitHub workflows run).", no_args_is_help=True)
 app.add_typer(run_app, name="run")
+drift_app = typer.Typer(help="Drift diagnostics.", no_args_is_help=True)
+app.add_typer(drift_app, name="drift")
 
 ISSUE_TIME_FORMATS = ["%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]
 
@@ -368,6 +370,30 @@ def run_keepalive(
     typer.echo(json.dumps(out, indent=1, default=str))
     if out["status"] == "failed":
         raise typer.Exit(code=1)
+
+
+@drift_app.command("reference")
+def drift_reference(
+    version: str = typer.Option("", help="Model version; default: the current champion."),
+) -> None:
+    """Build models/<version>/reference_features.parquet (PSI reference) from the store data."""
+    from gridcast.backtest.harness import load_actuals
+    from gridcast.drift import psi
+    from gridcast.features.build import load_history, load_weather
+    from gridcast.jobs.predict import CHAMPION_KEY
+    from gridcast.storage import objstore
+
+    store = objstore.private_store()
+    version = version or str(store.get_json(CHAMPION_KEY)["model_version"])
+    engine = _jobs_engine()
+    try:
+        raw, weather, actuals = load_history(engine), load_weather(engine), load_actuals(engine)
+    finally:
+        engine.dispose()
+    ref = psi.build_reference(raw, weather, actuals)
+    blob = psi.to_parquet(ref)
+    store.put_bytes(psi.reference_key(version), blob, "application/vnd.apache.parquet")
+    typer.echo(f"{psi.reference_key(version)}: {len(ref)} rows, {len(blob)} bytes")
 
 
 @prune_app.command("adequacy")

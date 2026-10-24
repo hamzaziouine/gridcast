@@ -145,3 +145,39 @@ def test_rerun_is_skipped_and_revisions_are_rescored(env: Any) -> None:
         ).all()
     assert revs == [(3,)]
     assert [s[0] for s in statuses] == ["ok", "skipped", "ok"]
+
+
+def test_score_daily_missing_alarm_is_armed_only_with_live_forecasts(env: Any) -> None:
+    eng = env[0]
+    assert not daily.score_daily_missing(eng, DAY)  # Jan 31 is scored
+    assert not daily.score_daily_missing(eng, DAY + timedelta(days=1))  # no forecast hit Feb 1
+    assert not daily.score_daily_missing(eng, date(2024, 1, 30))  # before 1 full live day
+    with eng.begin() as conn:
+        conn.execute(text("DELETE FROM score_daily WHERE score_date = '2024-01-31'"))
+    assert daily.score_daily_missing(eng, DAY)
+
+
+def test_interval_recalibration_needs_14_live_days_then_writes_a_new_version(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    eng, private, _ = env
+    champion = private.get_json(predict.CHAMPION_KEY)
+    hi = daily.day_start(DAY)
+    assert daily.recalibrate_intervals(eng, private, champion, hi, DAY) is None  # 2 days < 14
+    monkeypatch.setattr(daily, "RECAL_MIN_DAYS", 2)
+    out = daily.recalibrate_intervals(eng, private, champion, hi, DAY)
+    assert out == {"status": "recalibrated", "key": "models/lgbm-test/intervals.v0002.json",
+                   "days": 2}  # fmt: skip
+    after = private.get_json(predict.CHAMPION_KEY)
+    assert after["intervals_key"] == out["key"] and after["intervals_recalibrated_on"] == str(DAY)
+    assert {k: after[k] for k in champion if k != "intervals_key"} == {
+        k: champion[k] for k in champion if k != "intervals_key"
+    }  # nothing else in the pointer moved
+    assert daily.recalibrate_intervals(eng, private, after, hi, DAY) == {"status": "exists"}
+    with eng.connect() as conn:
+        n = conn.execute(
+            text("SELECT count(*) FROM model_registry_events"
+                 " WHERE event_type = 'interval_recalibrated'")
+        ).scalar_one()  # fmt: skip
+    assert n == 1
+    private.put_json(predict.CHAMPION_KEY, champion)  # leave the module's pointer as it was

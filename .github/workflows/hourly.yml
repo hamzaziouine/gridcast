@@ -62,3 +62,22 @@ jobs:
           args=(--run-kind "$RUN_KIND")
           if [ -n "$ISSUE_TIME" ]; then args+=(--issue-time "$ISSUE_TIME"); fi
           uv run --no-sync gridcast run hourly "${args[@]}"
+
+      # Plan §6.1 step 9b: probe the public API (the Cloudflare Worker, ADR-0011) and ping its own
+      # Healthchecks check. Skipped until the repository variable PUBLIC_API_URL is set (owner, after
+      # the Worker is deployed); never affects the forecast run's status.
+      - name: Public API probe
+        if: always() && vars.PUBLIC_API_URL != ''
+        continue-on-error: true
+        env:
+          API: ${{ vars.PUBLIC_API_URL }}
+          HC: ${{ secrets.HEALTHCHECKS_API_URL }}
+        run: |
+          ok=0
+          body=$(curl -fsS -m 60 "${API%/}/health") && echo "$body" | grep -q '"stale":false' && ok=1
+          echo "health: ${body:0:300}"
+          if [ -n "$HC" ]; then
+            suffix=""; [ "$ok" = 1 ] || suffix="/fail"
+            curl -fsS -m 10 -o /dev/null "${HC%/}${suffix}" || true
+          fi
+          [ "$ok" = 1 ]

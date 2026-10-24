@@ -8,7 +8,8 @@
    recorded backtest without refitting the champion procedure on the runner (§4.7: "both
    procedures refit on identical folds"; the champion's per-fold run is deterministic, §16).
 4. Final fit on every hour with a final actual (profile's issue grid), artifacts to
-   `models/<version>/` (model, `intervals.v0001.json`, `backtest.json`, `train_meta.json`).
+   `models/<version>/` (model, `intervals.v0001.json`, `backtest.json`, `train_meta.json`,
+   `reference_features.parquet` for the PSI diagnostic).
 5. MLflow run (experiment `gridcast-retrain`; DagsHub when MLFLOW_TRACKING_URI is set). An
    MLflow outage is a note: serving never depends on it (ADR-0005).
 6. Registry events `trained` and `backtested`, then the backtest stage of the gate (§4.7 step 1):
@@ -38,6 +39,7 @@ from sqlalchemy import Engine
 
 from gridcast.backtest.harness import TRAIN_START, Fold, headline, load_actuals, run_backtest
 from gridcast.config import COVERAGE_BAND, get_settings
+from gridcast.drift import psi as psi_mod
 from gridcast.features.build import load_history, load_weather
 from gridcast.features.schema import FEATURE_SCHEMA_VERSION
 from gridcast.ingest import openmeteo
@@ -189,6 +191,11 @@ def _retrain(
         raise RuntimeError("backtest produced no interval offsets")
     summary = result.summary()
     store.put_bytes(artifact_key, blob, "application/gzip")
+    store.put_bytes(
+        psi_mod.reference_key(version),
+        psi_mod.to_parquet(psi_mod.build_reference(raw, weather, actuals)),
+        "application/vnd.apache.parquet",
+    )
     store.put_bytes(intervals_key, offsets.to_json().encode(), "application/json")
     store.put_json(
         prefix + "backtest.json",

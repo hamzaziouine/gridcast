@@ -36,6 +36,7 @@ Every window compares models on the same (target_time, horizon) pairs: those the
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -47,6 +48,7 @@ from sqlalchemy import Connection, Engine, text
 
 from gridcast.backtest.harness import peak_thresholds, score
 from gridcast.config import get_settings
+from gridcast.drift import checks
 from gridcast.ingest import ieso_demand
 from gridcast.ingest.http import Fetched, list_directory
 from gridcast.jobs import predict, publish, runs
@@ -352,38 +354,152 @@ def write_drift(engine: Engine, rows: list[dict[str, Any]]) -> None:
         conn.execute(
             text(
                 "INSERT INTO drift_metrics (run_time, window_start, window_end, metric, feature,"
-                " value, threshold, breached, context) VALUES (:rt, :ws, :we, :metric, '', :value,"
+                " value, threshold, breached, context) VALUES (:rt, :ws, :we, :metric, :feature,"
+                " :value,"
                 " :thr, :br, CAST(:ctx AS jsonb)) ON CONFLICT (run_time, metric, feature) DO UPDATE"
                 " SET value = EXCLUDED.value, threshold = EXCLUDED.threshold, breached ="
                 " EXCLUDED.breached, context = EXCLUDED.context, window_start ="
                 " EXCLUDED.window_start, window_end = EXCLUDED.window_end"
             ),
-            rows,
+            [{"feature": "", **r} for r in rows],
         )
 
 
 TRIGGER_DAYS = 3
 TRIGGER_MIN_LIVE_DAYS = 7
 RETRAIN_COOLDOWN = timedelta(hours=72)
+PSI_MAPE_RATIO = 1.2
+RECAL_MIN_DAYS = 14
+RECAL_WINDOW = timedelta(days=60)
 
 
-def retrain_trigger(engine: Engine, drift: list[dict[str, Any]], now: datetime) -> str | None:
-    """Plan §6.2 step 4 (i): the champion's 7-day MAPE above 1.5 x its reference for 3
-    consecutive days -> `drift:mape`, unless a retrain started in the last 72 h. The 7-day
-    window must hold 7 live days (with fewer it is not a 7-day MAPE). A shadow does not suppress
-    it: the retrain queues its candidate (§4.7 item 7)."""
-    row = next((r for r in drift if r["metric"] == "rolling_mape_7d"), None)
-    if row is None or not row["br"]:
+def retrain_trigger(
+    engine: Engine, drift: list[dict[str, Any]], now: datetime, shadow_active: bool = False
+) -> str | None:
+    """Plan §6.2 step 4 triggers, each needing a 7-day MAPE over >= 7 live days and no retrain
+    started in the last 72 h:
+    (i) `drift:mape`: the champion's 7-day MAPE above 1.5 x its reference for 3 consecutive days
+        (allowed while a shadow runs: the retrain queues its candidate, §4.7 item 7);
+    (iii) `drift:psi+mape`: PSI > 0.25 on >= 2 features for 3 consecutive days and the 7-day MAPE
+        above 1.2 x the reference; suppressed while a shadow runs.
+    The coverage rule (ii) recalibrates intervals instead of retraining."""
+    roll = next((r for r in drift if r["metric"] == "rolling_mape_7d"), None)
+    ref = next((r for r in drift if r["metric"] == "ref_mape_30d"), None)
+    if roll is None or ref is None:
         return None
-    ctx = json.loads(row["ctx"])
-    if ctx["consecutive_days"] < TRIGGER_DAYS or ctx.get("live_days", 0) < TRIGGER_MIN_LIVE_DAYS:
+    ctx = json.loads(roll["ctx"])
+    if ctx.get("live_days", 0) < TRIGGER_MIN_LIVE_DAYS:
+        return None
+    reason = None
+    if roll["br"] and ctx["consecutive_days"] >= TRIGGER_DAYS:
+        reason = "drift:mape"
+    else:
+        hot = [
+            r for r in drift
+            if r["metric"] == "psi" and json.loads(r["ctx"])["consecutive_days"] >= TRIGGER_DAYS
+        ]  # fmt: skip
+        if len(hot) >= 2 and not shadow_active and roll["value"] > PSI_MAPE_RATIO * ref["value"]:
+            reason = "drift:psi+mape"
+    if reason is None:
         return None
     with engine.connect() as conn:
         recent = conn.execute(
             text("SELECT 1 FROM pipeline_runs WHERE job = 'retrain' AND started_at > :t LIMIT 1"),
             {"t": now - RETRAIN_COOLDOWN},
         ).first()
-    return None if recent is not None else "drift:mape"
+    return None if recent is not None else reason
+
+
+# ------------------------------------------------------------------------------ 3b. intervals
+
+
+def recalibrate_intervals(
+    engine: Engine, store: ObjectStore, champion: dict[str, Any] | None, hi: datetime, d: date
+) -> dict[str, Any] | None:
+    """Plan §4.5 ladder (ii), §6.2 step 3b: once the champion has >= 14 EST days of final-scored
+    live residuals, replace its p10/p90 offsets each day with the per-horizon 10/90 % quantiles of
+    its relative residuals over the trailing min(60, available) days: a new
+    `intervals.vNNNN.json` next to the model, `champion.json` pointed at it, an
+    `interval_recalibrated` event. Idempotent per day. seasonal_naive_168 needs nothing here:
+    its offsets are already refitted on the trailing 60 days at every prediction."""
+    if not champion or champion.get("model_name") != "lgbm":
+        return None
+    if champion.get("intervals_recalibrated_on") == str(d):
+        return {"status": "exists"}
+    with engine.connect() as conn:
+        res = pd.read_sql(
+            text(
+                "SELECT target_time, horizon, p50, actual_mw AS actual FROM v_scores"
+                " WHERE model_name = 'champion' AND model_version = :v"
+                " AND target_time >= :lo AND target_time < :hi"
+            ),
+            conn,
+            params={"v": champion["model_version"], "lo": hi - RECAL_WINDOW, "hi": hi},
+        )
+    res["target_time"] = pd.to_datetime(res["target_time"], utc=True)
+    days = {est_date(t) for t in res["target_time"].dt.to_pydatetime()}
+    if len(days) < RECAL_MIN_DAYS:
+        return None
+    from gridcast.jobs.train import _event
+    from gridcast.models.intervals import fit_offsets
+
+    old = str(champion["intervals_key"])
+    m = re.search(r"intervals\.v(\d+)\.json$", old)
+    n = int(m.group(1)) + 1 if m else 2
+    key = f"models/{champion['model_version']}/intervals.v{n:04d}.json"
+    off = fit_offsets(res, 1.0, f"live residuals, {len(days)} EST days to {d - timedelta(days=1)}")
+    store.put_bytes(key, off.to_json().encode(), "application/json")
+    store.put_json(
+        predict.CHAMPION_KEY,
+        {**champion, "intervals_key": key, "intervals_recalibrated_on": str(d)},
+    )
+    _event(
+        engine,
+        event_type="interval_recalibrated",
+        model_name=str(champion["model_name"]),
+        model_version=str(champion["model_version"]),
+        mlflow_run_id=champion.get("mlflow_run_id"),
+        artifact_key=key,
+        metrics={"days": len(days), "n": len(res), "previous": old, "q10": off.q10, "q90": off.q90},
+        reason=f"daily live recalibration ({len(days)} days)",
+        triggered_by="schedule",
+    )
+    return {"status": "recalibrated", "key": key, "days": len(days)}
+
+
+# ------------------------------------------------------------------------------ 6b. alarms
+
+
+def score_daily_missing(engine: Engine, d: date) -> bool:
+    """Plan §6.2 step 6b: no champion `score_daily` row for yesterday although champion forecasts
+    targeted it. Armed only once there is >= 1 full day of live data (the first champion issue is
+    at least an hour before yesterday began), so it cannot fire on the first days; a day with no
+    champion forecast at all is the hourly job's alarm, not this one."""
+    yesterday = d - timedelta(days=1)
+    y0 = day_start(yesterday)
+    with engine.connect() as conn:
+        first = conn.execute(
+            text("SELECT min(issue_time) FROM prediction_runs WHERE model_id = 1")
+        ).scalar()
+        if first is None or first > y0 - timedelta(hours=1):
+            return False
+        targeted = conn.execute(
+            text(
+                "SELECT 1 FROM prediction_runs WHERE model_id = 1 AND issue_time >= :a"
+                " AND issue_time < :b LIMIT 1"
+            ),
+            {"a": y0 - timedelta(hours=24), "b": y0 + timedelta(hours=23)},
+        ).first()
+        if targeted is None:
+            return False
+        have = conn.execute(
+            text(
+                "SELECT 1 FROM score_daily WHERE score_date = :d AND model_name = 'champion'"
+                " AND horizon_band = 'all'"
+            ),
+            {"d": yesterday},
+        ).first()
+    return have is None
 
 
 # ------------------------------------------------------------------------------ 6. scoreboard
@@ -519,11 +635,28 @@ def run(
             champion = store.get_json(predict.CHAMPION_KEY)
         except Exception as exc:
             notes.error("champion.json", exc)
+        try:
+            out["intervals"] = recalibrate_intervals(engine, store, champion, hi, d)
+            if out["intervals"] and out["intervals"]["status"] == "recalibrated":
+                champion = store.get_json(predict.CHAMPION_KEY)
+        except Exception as exc:
+            notes.error("intervals recalibrate", exc)
         bt = backtest_mape(engine, (champion or {}).get("model_version"))
         drift = drift_signals(engine, df, hi, hi, bt)
+        try:
+            frows, fnotes = checks.feature_drift(engine, store, champion, hi, hi)
+            drift += frows
+            out["drift_notes"] = fnotes
+        except Exception as exc:  # a diagnostic never fails the scoring
+            notes.error("feature drift", exc)
         write_drift(engine, drift)
-        out["drift"] = {r["metric"]: [r["value"], r["br"]] for r in drift}
-        out["retrain_trigger"] = retrain_trigger(engine, drift, now)
+        out["drift"] = {
+            (r["metric"] + (":" + r["feature"] if r.get("feature") else "")): [r["value"], r["br"]]
+            for r in drift
+        }
+        out["retrain_trigger"] = retrain_trigger(
+            engine, drift, now, shadow_active=store.exists(predict.SHADOW_KEY)
+        )
         if out["retrain_trigger"]:
             notes.add(f"retrain trigger: {out['retrain_trigger']}")
         if any(r["metric"] == "neon_storage_mb" and r["br"] for r in drift):
@@ -547,6 +680,9 @@ def run(
     elif newest < hi - timedelta(hours=1) and status == "ok":
         notes.add("pub_demand_incomplete: yesterday HE24 not posted yet (retry next slot)")
         status = "skipped"
+    elif status == "ok" and score_daily_missing(engine, d):
+        notes.add("score_daily_missing: no champion score_daily row for yesterday")
+        status = "failed"
 
     out["status"] = runs.finish(engine, run_id, status, written, notes.private)
     out["notes"] = notes.public

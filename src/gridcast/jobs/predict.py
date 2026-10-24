@@ -4,6 +4,9 @@
 - Shadow (C18/C19): when `models/shadow.json` exists, the same features are scored by the shadow
   candidate and written as `model_name='shadow'` (insert-only, like the champion). A shadow
   failure never blocks the champion rows: it is reported in `shadow_error`.
+- live_features: the horizon-1 PSI features and the L0 lag of the champion's feature frame, one
+  row per issue hour, insert-only (drift diagnostics, DATA_NOTES §19.3); a failure is reported in
+  `live_features_error` and never blocks the forecast.
 - Baselines: seasonal_naive_168 / _24 / persistence on the same as-of history; p10/p90 from each
   baseline's own relative residuals over the 60 days before the cutoff, using only actuals
   visible at the cutoff.
@@ -164,6 +167,26 @@ def champion_rows(
     return out, champ
 
 
+def write_live_features(engine: Engine, frame: pd.DataFrame) -> None:
+    from gridcast.drift.psi import LIVE_COLUMNS
+
+    row = frame[frame["horizon"] == 1].iloc[0]
+    params: dict[str, Any] = {"i": row["issue_time"].to_pydatetime()}
+    for c in LIVE_COLUMNS:
+        v = float(row[c])
+        params[c] = None if np.isnan(v) else v
+    cols = ", ".join(LIVE_COLUMNS)
+    vals = ", ".join(f":{c}" for c in LIVE_COLUMNS)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"INSERT INTO live_features (issue_time, {cols}) VALUES (:i, {vals})"  # noqa: S608 - constant columns
+                " ON CONFLICT (issue_time) DO NOTHING"
+            ),
+            params,
+        )
+
+
 def _version_ids(conn: Connection, versions: list[str]) -> dict[str, int]:
     conn.execute(
         text(
@@ -248,6 +271,7 @@ def run(
     champ: dict[str, Any] | None = None
     max_avail = None
     shadow_error: str | None = None
+    live_features_error: str | None = None
     if wx is not None:
         frame = FeatureBuilder(history, wx).frame([issue])  # assert_asof inside
         champ_rows, champ = champion_rows(store, frame, history, issue)
@@ -262,6 +286,10 @@ def run(
                 parts.append(champion_rows(store, frame, history, issue, SHADOW_KEY, "shadow")[0])
         except Exception as exc:  # the shadow must never cost the champion its rows
             shadow_error = type(exc).__name__
+        try:
+            write_live_features(engine, frame)
+        except Exception as exc:  # a drift diagnostic must never cost the forecast
+            live_features_error = type(exc).__name__
     rows = pd.concat([p for p in parts if not p.empty], ignore_index=True)[
         ["issue_time", "target_time", "horizon", "model_name", "model_version", "p10", "p50", "p90"]
     ]
@@ -281,4 +309,5 @@ def run(
         "rows_written": written,
         "max_input_available_at": max_avail,
         "shadow_error": shadow_error,
+        "live_features_error": live_features_error,
     }

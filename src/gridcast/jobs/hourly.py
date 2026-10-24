@@ -109,6 +109,8 @@ def _predict_hour(
     )
     if out.get("shadow_error"):
         notes.add(f"shadow {issue:%Y-%m-%dT%HZ}: {out['shadow_error']} (champion unaffected)")
+    if out.get("live_features_error"):
+        notes.add(f"live_features {issue:%Y-%m-%dT%HZ}: {out['live_features_error']}")
     return dict(out["rows_written"])
 
 

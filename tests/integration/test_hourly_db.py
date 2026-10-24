@@ -89,6 +89,9 @@ def test_first_run_forecasts_and_leaves_honest_gaps(env: Any) -> None:
     with eng.connect() as conn:
         idx = conn.execute(text("SELECT issue_time, n_rows FROM weather_snapshot_index")).all()
     assert [(r[0].astimezone(UTC), r[1]) for r in idx] == [(T0, 72)]
+    with eng.connect() as conn:  # the drift diagnostics' record of what was served (h = 1)
+        lf = conn.execute(text("SELECT issue_time, mkt_l0_age_h FROM live_features")).all()
+    assert [r[0].astimezone(UTC) for r in lf] == [T0] and lf[0][1] is not None
 
 
 def test_rerun_is_skipped_and_writes_nothing(env: Any) -> None:
