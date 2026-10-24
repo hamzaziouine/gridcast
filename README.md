@@ -10,14 +10,13 @@ Cloudflare R2 and DagsHub MLflow.
 
 | | |
 |---|---|
-| Public API (forecast, scoreboard, health) | **Not deployed yet.** The Cloudflare Worker in [`infra/worker/`](infra/worker/) is built and tested; its URL goes here once it is live. |
+| Public API | <https://gridcast.hamzaziouine-23.workers.dev>: [`/v1/forecast/latest`](https://gridcast.hamzaziouine-23.workers.dev/v1/forecast/latest), [`/v1/scoreboard`](https://gridcast.hamzaziouine-23.workers.dev/v1/scoreboard), [`/health`](https://gridcast.hamzaziouine-23.workers.dev/health) (Cloudflare Worker in [`infra/worker/`](infra/worker/), deployed by Workers Builds on every push to `main`) |
 | Hourly forecasts | Since 2026-10-24 ([`hourly.yml`](.github/workflows/hourly.yml), cron `:02/:12/:22`). |
 | Daily scoring | First run 2026-10-24 ([`daily.yml`](.github/workflows/daily.yml), 13:20Z and 18:20Z). |
 | Weekly retrain + backtest gate | [`retrain.yml`](.github/workflows/retrain.yml), Sunday 03:00Z. The first run (2026-10-24) took 13 min and its candidate was rejected (see below). |
 | Experiment tracking | [DagsHub MLflow](https://dagshub.com/hamzaziouine/gridcast.mlflow) |
 
-Once the Worker is live, the API will serve `GET /v1/forecast/latest`, `GET /v1/scoreboard` and
-`GET /health`. All three are read from JSON files that the jobs publish to R2
+All three endpoints are read from JSON files that the jobs publish to R2
 ([ADR-0011](docs/adr/0011-public-snapshots-and-worker-api.md)).
 
 ## How good is it?
