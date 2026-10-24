@@ -190,8 +190,13 @@ def load_actuals(engine: Engine) -> pd.Series:
 
 
 def headline(result: BacktestResult) -> dict[str, float]:
-    s = {k: {str(m): float(v) for m, v in col.items()} for k, col in result.summary().items()
-         if k != "coverage_basis"}  # fmt: skip
+    return headline_from_summary(result.summary())
+
+
+def headline_from_summary(summary: pd.DataFrame) -> dict[str, float]:
+    """Flat metric dict (MLflow / registry) from a `BacktestResult.summary()` table."""
+    s = {k: {str(m): float("nan") if v is None else float(v) for m, v in col.items()}
+         for k, col in summary.items() if k != "coverage_basis"}  # fmt: skip
     out = {
         "lgbm_mape": s["mape"]["lgbm"],
         "lgbm_peak_mape": s["peak_mape"]["lgbm"],

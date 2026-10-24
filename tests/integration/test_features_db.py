@@ -20,8 +20,8 @@ START = datetime(2024, 1, 1, tzinfo=UTC)
 END = datetime(2024, 2, 1, tzinfo=UTC)
 
 
-def load_synthetic(engine: Engine) -> None:
-    raw = raw_history(START, END)
+def load_synthetic(engine: Engine, start: datetime = START, end: datetime = END) -> None:
+    raw = raw_history(start, end)
     he = [utc_to_he(t) for t in raw["target_time"].dt.to_pydatetime()]
     raw["local_date"] = [d for d, _ in he]
     raw["hour_ending"] = [h for _, h in he]
@@ -39,7 +39,7 @@ def load_synthetic(engine: Engine) -> None:
         "available_at_kind",
         "fetched_at",
     ]
-    w = weather_frame(START, END)
+    w = weather_frame(start, end)
     w["source"] = "historical_forecast"
     w["available_at_kind"] = "modelled"
     wcols = ["valid_time", "available_at", "source", "available_at_kind", *WEATHER_COLUMNS]

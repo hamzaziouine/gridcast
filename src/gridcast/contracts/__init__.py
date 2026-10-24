@@ -188,3 +188,47 @@ def check_newest_snapshot(newest_created_at: datetime, fetched_at: datetime) -> 
         raise ValueError(
             f"newest Adequacy3 CreatedAt {newest_created_at} not within 3 days before {fetched_at}"
         )
+
+
+def _interval_order(df: pd.DataFrame) -> pd.Series:
+    lo_ok = df["p10"].isna() | (df["p10"] <= df["p50"])
+    hi_ok = df["p90"].isna() | (df["p90"] >= df["p50"])
+    return lo_ok & hi_ok
+
+
+# Rows `gridcast predict` writes (plan §7.2): one issue time, 24 horizons per model name.
+Predictions = pa.DataFrameSchema(
+    {
+        "issue_time": pa.Column(checks=[UTC_TS, ON_THE_HOUR], nullable=False),
+        "target_time": pa.Column(checks=[UTC_TS, ON_THE_HOUR], nullable=False),
+        "horizon": pa.Column(int, pa.Check.in_range(1, 24), coerce=True),
+        "model_name": pa.Column(
+            str,
+            pa.Check.isin(
+                [
+                    "champion",
+                    "shadow",
+                    "prev_champion",
+                    "seasonal_naive_168",
+                    "seasonal_naive_24",
+                    "persistence",
+                    "ieso_adequacy",
+                ]
+            ),
+        ),
+        "model_version": pa.Column(str, pa.Check.str_length(min_value=1)),
+        "p10": pa.Column(float, nullable=True, coerce=True),
+        "p50": pa.Column(float, pa.Check.in_range(*ONTARIO_MW), coerce=True),
+        "p90": pa.Column(float, nullable=True, coerce=True),
+    },
+    checks=[
+        pa.Check(_interval_order, error="p10 <= p50 <= p90 violated"),
+        pa.Check(
+            lambda df: df["target_time"] == df["issue_time"] + pd.to_timedelta(df["horizon"], "h"),
+            error="target_time != issue_time + horizon h",
+        ),
+    ],
+    unique=["issue_time", "model_name", "horizon"],
+    strict=True,
+    name="Predictions",
+)

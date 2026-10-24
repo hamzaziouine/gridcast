@@ -152,6 +152,74 @@ def backtest(
                               headline(res), {})  # fmt: skip
 
 
+@app.command()
+def train(
+    allow_fallback: bool = typer.Option(
+        False,
+        "--allow-fallback",
+        help="If the hard floor fails, promote seasonal_naive_168 (only after 2026-10-30 12:00Z).",
+    ),
+    register_only: str = typer.Option(
+        "", help="Skip training: register + bootstrap this already-uploaded model version."
+    ),
+    mlflow_run_id: str = typer.Option("", help="With --register-only: the MLflow run id."),
+) -> None:
+    """Backtest + final fit; artifact to the private bucket; bootstrap champion.json if absent."""
+    import json
+
+    from gridcast.jobs import train as train_job
+    from gridcast.storage import objstore
+
+    engine = _jobs_engine()
+    try:
+        store = objstore.private_store()
+        if register_only:
+            out = train_job.register(
+                engine, store, register_only, allow_fallback, mlflow_run_id=mlflow_run_id or None
+            )
+        else:
+            out = train_job.run(engine, store, allow_fallback, log=typer.echo)
+    finally:
+        engine.dispose()
+    typer.echo(json.dumps(out, indent=1, default=str))
+
+
+@app.command()
+def predict(
+    issue_time: datetime = typer.Option(  # noqa: B008 - Typer's documented pattern
+        ...,
+        "--issue-time",
+        formats=["%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"],
+        help="Top of an hour; no offset means UTC (e.g. 2026-10-24T01:00:00+00:00).",
+    ),
+    weather: str = typer.Option(
+        "store", help="'store' = weather_hourly; 'live' = fetch an Open-Meteo snapshot now."
+    ),
+    run_kind: str = typer.Option("manual", help="scheduled | catchup | manual"),
+) -> None:
+    """Write 24 x (champion + 3 baselines + ieso_adequacy) prediction rows for one issue time."""
+    import json
+
+    from gridcast.ingest import http, openmeteo
+    from gridcast.jobs import predict as predict_job
+    from gridcast.storage import objstore
+
+    issue = issue_time if issue_time.tzinfo else issue_time.replace(tzinfo=UTC)
+    engine = _jobs_engine()
+    try:
+        out = predict_job.run(
+            engine,
+            objstore.private_store(),
+            issue,
+            weather=weather,
+            fetch_snapshot=lambda: openmeteo.fetch_live(lambda u, p: http.fetch(u, params=p)),
+            run_kind=run_kind,
+        )
+    finally:
+        engine.dispose()
+    typer.echo(json.dumps(out, indent=1, default=str))
+
+
 @prune_app.command("adequacy")
 def prune_adequacy(
     vacuum_full: bool = typer.Option(
