@@ -1,0 +1,61 @@
+name: keepalive
+
+# C16 (BUILD_PLAN §6.7): GitHub disables a public repo's scheduled workflows after 60 days without
+# repository activity. Once a week this re-enables every workflow that has a `schedule:` trigger
+# (this one included) through the REST API, which needs `actions: write` and nothing else; it
+# never commits, pushes or touches any branch. Then `gridcast run keepalive` checks that hourly,
+# daily and (once it has run) the retrain loop are still producing results.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write # PUT /actions/workflows/{file}/enable
+      contents: read # checkout
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # Optional: unset = no heartbeat.
+      HEALTHCHECKS_KEEPALIVE_URL: ${{ secrets.HEALTHCHECKS_KEEPALIVE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Re-enable every scheduled workflow (resets the inactivity clock)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for f in $(grep -lE '^[[:space:]]*schedule:' .github/workflows/*.yml); do
+            name=$(basename "$f")
+            gh api -X PUT "repos/$REPO/actions/workflows/$name/enable" --silent
+            echo "enabled $name"
+          done
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.11 and runtime dependencies
+        run: |
+          uv python install 3.11
+          uv sync --locked --no-dev
+
+      - name: gridcast run keepalive
+        env:
+          RUN_KIND: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
+        run: uv run --no-sync gridcast run keepalive --run-kind "$RUN_KIND"
+
+      - name: Heartbeat /fail when the enable step failed
+        if: failure() && env.HEALTHCHECKS_KEEPALIVE_URL != ''
+        run: curl -fsS -m 10 -o /dev/null "${HEALTHCHECKS_KEEPALIVE_URL%/}/fail" || true
