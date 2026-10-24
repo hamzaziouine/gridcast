@@ -16,8 +16,9 @@ For the EST day D the run is for (default: today, EST), logical_time = D 00:00 E
    rolling_mape_7d (champion) vs 1.5 x ref_mape_30d (champion's trailing 30 d excluding the
    last 7, or its backtest MAPE until 30 live days exist), naive_mape_7d (seasonal_naive_168,
    context), coverage_30d vs [0.72, 0.88], consecutive breach days in `context`; plus the §6.2
-   step 6c storage guard (neon_storage_mb, warn 400, fail 450). Nothing triggers a retrain:
-   C11 records the signals only (DATA_NOTES §18.3).
+   step 6c storage guard (neon_storage_mb, warn 400, fail 450). `retrain_trigger`: 7-day MAPE
+   breached 3 consecutive days with >= 7 live days and no retrain in 72 h -> `drift:mape`;
+   daily.yml then dispatches retrain.yml (ADR-0013).
 6. Publish latest/scoreboard.json (schema below). Heartbeat HEALTHCHECKS_DAILY_URL (optional).
 
 Status: `skipped` (retried by the 18:20 slot) when yesterday HE24 is still missing after the
@@ -330,7 +331,8 @@ def drift_signals(
     thr = MAPE_RATIO * ref
     out = [
         row("rolling_mape_7d", roll7, thr, bool(roll7 > thr), win,
-            ref_basis=ref_basis, trigger_rule="breached 3 consecutive days -> retrain (not wired)"),
+            ref_basis=ref_basis, live_days=int(live_days),
+            trigger_rule="breached 3 consecutive days (>= 7 live days) -> retrain.yml drift:mape"),
         row("ref_mape_30d", ref, float("nan"), False, w30_, basis=ref_basis),
         row("naive_mape_7d", _mape(w7, "seasonal_naive_168"), float("nan"), False, win),
         row("coverage_30d", float(cov), COVERAGE_DRIFT_BAND[0],
@@ -358,6 +360,30 @@ def write_drift(engine: Engine, rows: list[dict[str, Any]]) -> None:
             ),
             rows,
         )
+
+
+TRIGGER_DAYS = 3
+TRIGGER_MIN_LIVE_DAYS = 7
+RETRAIN_COOLDOWN = timedelta(hours=72)
+
+
+def retrain_trigger(engine: Engine, drift: list[dict[str, Any]], now: datetime) -> str | None:
+    """Plan §6.2 step 4 (i): the champion's 7-day MAPE above 1.5 x its reference for 3
+    consecutive days -> `drift:mape`, unless a retrain started in the last 72 h. The 7-day
+    window must hold 7 live days (with fewer it is not a 7-day MAPE). A shadow does not suppress
+    it: the retrain queues its candidate (§4.7 item 7)."""
+    row = next((r for r in drift if r["metric"] == "rolling_mape_7d"), None)
+    if row is None or not row["br"]:
+        return None
+    ctx = json.loads(row["ctx"])
+    if ctx["consecutive_days"] < TRIGGER_DAYS or ctx.get("live_days", 0) < TRIGGER_MIN_LIVE_DAYS:
+        return None
+    with engine.connect() as conn:
+        recent = conn.execute(
+            text("SELECT 1 FROM pipeline_runs WHERE job = 'retrain' AND started_at > :t LIMIT 1"),
+            {"t": now - RETRAIN_COOLDOWN},
+        ).first()
+    return None if recent is not None else "drift:mape"
 
 
 # ------------------------------------------------------------------------------ 6. scoreboard
@@ -497,6 +523,9 @@ def run(
         drift = drift_signals(engine, df, hi, hi, bt)
         write_drift(engine, drift)
         out["drift"] = {r["metric"]: [r["value"], r["br"]] for r in drift}
+        out["retrain_trigger"] = retrain_trigger(engine, drift, now)
+        if out["retrain_trigger"]:
+            notes.add(f"retrain trigger: {out['retrain_trigger']}")
         if any(r["metric"] == "neon_storage_mb" and r["br"] for r in drift):
             notes.add(f"neon storage above {STORAGE_FAIL_MB} MB")
             status = "failed"

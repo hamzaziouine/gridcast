@@ -1,0 +1,69 @@
+name: retrain
+
+# C18 (BUILD_PLAN §6.3, ADR-0013): train a LightGBM candidate with the `fast` profile, backtest it
+# on the champion's own 12 folds, log to MLflow (DagsHub), and register it: `shadow_started`,
+# `candidate_queued` or `rejected` (§4.7 steps 1 and 6). It never writes champion.json; promotion
+# is the gate's job after >= 14 days of shadow. Measured: the fast backtest (288 booster fits)
+# takes ~13 min on 4 threads locally (DATA_NOTES §19.2); the timeout leaves room for a slow runner.
+on:
+  schedule:
+    - cron: "0 3 * * 0" # weekly, Sunday 03:00 UTC (plan, decided)
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why (manual, drift:mape, ...). Recorded in the registry."
+        required: false
+        default: "manual"
+      profile:
+        description: "LightGBM training profile (full takes hours on a runner)."
+        required: false
+        default: "fast"
+        type: choice
+        options: [fast, full]
+
+permissions: {}
+
+concurrency:
+  group: model-registry
+  cancel-in-progress: false
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      OBJSTORE_ENDPOINT_URL: ${{ secrets.OBJSTORE_ENDPOINT_URL }}
+      OBJSTORE_REGION: ${{ secrets.OBJSTORE_REGION }}
+      OBJSTORE_ACCESS_KEY_ID: ${{ secrets.OBJSTORE_ACCESS_KEY_ID }}
+      OBJSTORE_SECRET_ACCESS_KEY: ${{ secrets.OBJSTORE_SECRET_ACCESS_KEY }}
+      OBJSTORE_BUCKET_PRIVATE: ${{ secrets.OBJSTORE_BUCKET_PRIVATE }}
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+      MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
+      MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+      # Optional: unset = no heartbeat.
+      HEALTHCHECKS_RETRAIN_URL: ${{ secrets.HEALTHCHECKS_RETRAIN_URL }}
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.11 and runtime dependencies
+        run: |
+          uv python install 3.11
+          uv sync --locked --no-dev
+
+      - name: Runner
+        run: nproc && free -g
+
+      - name: gridcast run retrain
+        env:
+          REASON: ${{ github.event_name == 'schedule' && 'weekly' || inputs.reason }}
+          PROFILE: ${{ inputs.profile || 'fast' }}
+          RUN_KIND: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
+        run: uv run --no-sync gridcast run retrain --reason "$REASON" --profile "$PROFILE" --run-kind "$RUN_KIND"

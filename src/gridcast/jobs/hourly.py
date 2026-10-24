@@ -107,6 +107,8 @@ def _predict_hour(
         weather_frame=wx,
         run_kind=run_kind,
     )
+    if out.get("shadow_error"):
+        notes.add(f"shadow {issue:%Y-%m-%dT%HZ}: {out['shadow_error']} (champion unaffected)")
     return dict(out["rows_written"])
 
 

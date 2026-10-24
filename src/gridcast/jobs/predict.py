@@ -1,6 +1,9 @@
 """`gridcast predict --issue-time T` (C9): champion, baselines and IESO-as-of rows for one issue.
 
 - Champion: `models/champion.json` -> artifact (sha256 checked) + interval offsets.
+- Shadow (C18/C19): when `models/shadow.json` exists, the same features are scored by the shadow
+  candidate and written as `model_name='shadow'` (insert-only, like the champion). A shadow
+  failure never blocks the champion rows: it is reported in `shadow_error`.
 - Baselines: seasonal_naive_168 / _24 / persistence on the same as-of history; p10/p90 from each
   baseline's own relative residuals over the 60 days before the cutoff, using only actuals
   visible at the cutoff.
@@ -40,9 +43,10 @@ from gridcast.models.baselines import BASELINES, baseline_frame
 from gridcast.models.intervals import IntervalOffsets, fit_offsets
 from gridcast.models.lgbm import LgbmForecaster
 from gridcast.storage.objstore import ObjectStore
-from gridcast.timeutil import to_utc
+from gridcast.timeutil import floor_hour, to_utc
 
 CHAMPION_KEY = "models/champion.json"
+SHADOW_KEY = "models/shadow.json"
 BASELINE_WINDOW = timedelta(days=60)
 INSERT_ONLY = {"champion", "shadow", "prev_champion"}
 _MODEL_CACHE: dict[tuple[str, str], tuple[LgbmForecaster, IntervalOffsets]] = {}
@@ -123,12 +127,19 @@ def ieso_rows(engine: Engine, issue: datetime) -> pd.DataFrame:
 
 
 def champion_rows(
-    store: ObjectStore, frame: pd.DataFrame, history: DemandHistory, issue: datetime
+    store: ObjectStore,
+    frame: pd.DataFrame,
+    history: DemandHistory,
+    issue: datetime,
+    key: str = CHAMPION_KEY,
+    model_name: str = "champion",
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    champ = store.get_json(CHAMPION_KEY)
+    """Rows of the model a pointer (`champion.json`, or `shadow.json` as model_name 'shadow')
+    names."""
+    champ = store.get_json(key)
     out = frame[["issue_time", "target_time"]].copy()
     out["horizon"] = frame["horizon"].astype(int)
-    out["model_name"] = "champion"
+    out["model_name"] = model_name
     out["model_version"] = champ["model_version"]
     if champ["model_name"] == "lgbm":
         cache_key = (champ["sha256"], champ["intervals_key"])
@@ -236,11 +247,21 @@ def run(
     parts = [baseline_rows(history, issue), ieso_rows(engine, issue)]
     champ: dict[str, Any] | None = None
     max_avail = None
+    shadow_error: str | None = None
     if wx is not None:
         frame = FeatureBuilder(history, wx).frame([issue])  # assert_asof inside
         champ_rows, champ = champion_rows(store, frame, history, issue)
         parts.insert(0, champ_rows)
         max_avail = str(frame["input_available_at"].max())
+        try:
+            shadow = store.get_json(SHADOW_KEY) if store.exists(SHADOW_KEY) else None
+            # only issue hours from the shadow's start: its training data ends before then
+            if shadow is not None and issue >= floor_hour(
+                to_utc(datetime.fromisoformat(shadow["started_at"]))
+            ):
+                parts.append(champion_rows(store, frame, history, issue, SHADOW_KEY, "shadow")[0])
+        except Exception as exc:  # the shadow must never cost the champion its rows
+            shadow_error = type(exc).__name__
     rows = pd.concat([p for p in parts if not p.empty], ignore_index=True)[
         ["issue_time", "target_time", "horizon", "model_name", "model_version", "p10", "p50", "p90"]
     ]
@@ -259,4 +280,5 @@ def run(
         "rows_built": {str(k): int(v) for k, v in counts.items()},
         "rows_written": written,
         "max_input_available_at": max_avail,
+        "shadow_error": shadow_error,
     }
