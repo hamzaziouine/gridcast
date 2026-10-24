@@ -63,8 +63,8 @@ def test_stale_jobs_fail_and_the_loop_check_arms_after_the_first_retrain(
         conn.execute(
             text(
                 "INSERT INTO model_registry_events (event_time, event_type, model_name,"
-                " model_version, reason, triggered_by) VALUES (:t, 'rejected', 'lgbm', 'lgbm-x', 'test',"
-                " 'schedule')"
+                " model_version, reason, triggered_by)"
+                " VALUES (:t, 'rejected', 'lgbm', 'lgbm-x', 'test', 'schedule')"
             ),
             {"t": NOW - timedelta(days=2)},
         )
