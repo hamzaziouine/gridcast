@@ -170,3 +170,47 @@ def test_no_qualifying_weather_fails_the_hour_but_still_writes_baselines(env: An
     assert out["rows_written"]["seasonal_naive_168"] == 24
     assert pings == ["https://hc.example/ping/abc/fail"]
     assert _runs(eng, issue) == [("scheduled", "failed")]
+
+
+def test_late_run_after_the_cutoff_uses_the_previous_snapshot_and_pings_success(
+    env: Any,
+) -> None:
+    """GitHub cron lateness (ADR-0012): a run that starts after issue + 30 min cannot use its own
+    snapshot, but the previous slot's snapshot (fetched before the cutoff) still covers the hour,
+    so the champion forecast is honest and the heartbeat is a success, not /fail."""
+    eng, private, public = env
+    first = T0 + timedelta(days=5)  # far from the other tests' snapshots
+    pings: list[str] = []
+
+    def run_at(now: datetime) -> dict[str, Any]:
+        clock = Clock(now)
+        deps = hourly.Deps(
+            fetch=ieso_fetch(), fetch_snapshot=snapshot_fetcher(clock), now=clock, ping=pings.append
+        )
+        return hourly.run(eng, private, public, deps, catchup_hours=0)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("HEALTHCHECKS_HOURLY_URL", "https://hc.example/ping/abc")
+        assert run_at(first + timedelta(minutes=17))["status"] == "ok"
+        late = first + timedelta(hours=1)
+        out = run_at(late + timedelta(minutes=48))  # 18 min after data_cutoff
+        assert out["status"] == "ok", out
+        assert out["weather"] == "stored"  # fetched for the next hour, unusable for this one
+        assert champion_count(eng, late) == 24
+        # a duplicate slot for the same issue hour is skipped and still pings success
+        assert run_at(late + timedelta(minutes=55))["status"] == "skipped"
+    assert pings == ["https://hc.example/ping/abc"] * 3
+    with eng.connect() as conn:
+        slots = conn.execute(
+            text(
+                "SELECT issue_time, available_at FROM weather_snapshot_index"
+                " WHERE issue_time IN (:a, :b) ORDER BY 1"
+            ),
+            {"a": first, "b": late},
+        ).all()
+    # the late slot's own snapshot is after its cutoff; only the previous slot's qualified
+    assert [r[1].astimezone(UTC) for r in slots] == [
+        first + timedelta(minutes=17),
+        late + timedelta(minutes=48),
+    ]
+    assert _runs(eng, late) == [("scheduled", "ok"), ("scheduled", "skipped")]

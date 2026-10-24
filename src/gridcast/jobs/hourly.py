@@ -4,7 +4,7 @@ Steps, for `issue_time = floor(now)` (or `--issue-time`), `data_cutoff = issue_t
 
 0. Adequacy3: every not-yet-read version for today .. today+2 (EST), archived to the private
    bucket, retention prune; its own `pipeline_runs` row (job `ieso_adequacy`, logical_time = the
-   run's minute). Runs before the dedupe check, so the second cron slot picks up the ~:25 reissue.
+   run's minute). Runs before the dedupe check, so later cron slots pick up the ~:25 reissue.
 1. Dedupe: an `ok` row for (hourly, issue_time) -> this run is `skipped`, exit 0.
 2. RealtimeTotals: complete hours of the last 6 (404 / partial hours are skipped, never fatal).
 3. Live Open-Meteo snapshot -> private bucket Parquet + `weather_snapshot_index`
@@ -20,8 +20,11 @@ Steps, for `issue_time = floor(now)` (or `--issue-time`), `data_cutoff = issue_t
 7. Close the run row; heartbeat (HEALTHCHECKS_HOURLY_URL, optional).
 
 Status: `ok` when the issue hour has 24 champion rows; `failed` when it does not (no weather,
-model or database error) or publishing failed. Every failure is recorded in `notes` and the job
-still writes everything it can. Scoring is daily only (§3.0 decision 1: no provisional actuals).
+model or database error) or publishing failed. Success is per issue hour (ADR-0012): a later slot
+for an hour that is already `ok` is `skipped` and pings success; a run that starts after the
+cutoff uses the previous slot's snapshot (any snapshot up to ~23 h old covers the hour). Every
+failure is recorded in `notes` and the job still writes everything it can. Scoring is daily
+only (§3.0 decision 1: no provisional actuals).
 """
 
 from __future__ import annotations

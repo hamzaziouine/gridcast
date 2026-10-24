@@ -1062,11 +1062,12 @@ later than `issue_time + 30 min`. C10 stores these snapshots in the bucket.
 
 ### 17.1 Cadence and cron
 
-- Cron `7,27 * * * *` (the plan's two slots). At :07 the L0 hour (`issue − REALTIME_LAG_H`, 1 h)
-  has been complete since :53–:57 of the previous hour (§1.4), and the live weather snapshot is
-  fetched ~23 min before `data_cutoff = issue + 30 min`, which absorbs GitHub's usual cron delay.
-  The :27 slot queues behind :07 in the `hourly` concurrency group (`cancel-in-progress: false`)
-  and ends `skipped` once :07 wrote `ok`; it still ingests the ~:25 Adequacy3 reissue.
+- Cron `2,12,22 * * * *` since 2026-10-24 (ADR-0012; was the plan's `7,27`). On the first
+  scheduled day GitHub dropped the 18:07 and 18:27 slots and started 19:07 at 19:24. At :02 the
+  L0 hour (`issue − REALTIME_LAG_H`, 1 h) has been complete since :53–:57 of the previous hour
+  (§1.4). Slots queue in the `hourly` concurrency group (`cancel-in-progress: false`); the first
+  to write the hour's 24 champion rows marks it `ok`, later ones end `skipped` (success ping) and
+  still ingest Adequacy3 reissues.
 - A run that starts after the cutoff cannot use its own snapshot (`available_at = fetched_at` >
   cutoff); it falls back to the newest earlier snapshot that covers the hour, as catch-up does.
 - `REALTIME_LAG_H` stays at the provisional 1 (§1.4's day-long observation is still open).
