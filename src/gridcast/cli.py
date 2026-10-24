@@ -299,6 +299,25 @@ def run_daily(
         raise typer.Exit(code=1)
 
 
+@run_app.command("keepalive")
+def run_keepalive(
+    run_kind: str = typer.Option("scheduled", help="scheduled | manual"),
+) -> None:
+    """Backstop checks after keepalive.yml re-enabled the scheduled workflows (plan §6.7)."""
+    import json
+
+    from gridcast.jobs import keepalive
+
+    engine = _jobs_engine()
+    try:
+        out = keepalive.run(engine, run_kind=run_kind)
+    finally:
+        engine.dispose()
+    typer.echo(json.dumps(out, indent=1, default=str))
+    if out["status"] == "failed":
+        raise typer.Exit(code=1)
+
+
 @prune_app.command("adequacy")
 def prune_adequacy(
     vacuum_full: bool = typer.Option(

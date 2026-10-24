@@ -1214,3 +1214,25 @@ gridcast run daily --run-kind manual   (day 2026-10-24 EST)
 Neon after both jobs: `pg_database_size` = **74,956,800 B (75.0 MB)**; predictions 912 rows,
 prediction_runs 38, scores 15, score_daily 10, peak_hours 1,080, weather_snapshot_index 2,
 ieso_forecast_snapshots 2,064, ieso_adequacy_files 281, raw_demand_history 103,570, actuals 103,536.
+
+---
+
+## 19. Day 5 (2026-10-24 evening): keepalive, fast retrain, drift, README
+
+### 19.1 C16 `keepalive.yml` (plan §6.7)
+
+- Weekly (`0 6 * * 1`) + `workflow_dispatch`. Step 1 re-enables every workflow file containing a
+  `schedule:` trigger (itself included) with `gh api -X PUT
+  repos/{repo}/actions/workflows/{file}/enable`. Job permissions: `actions: write` (the enable
+  call) and `contents: read` (checkout), nothing else. It never commits or pushes. The plan notes
+  that "enable resets the 60-day clock" is not verified; it is the plan's chosen mechanism, and
+  the Healthchecks heartbeats remain the backstop.
+- Step 2, `gridcast run keepalive` (`jobs/keepalive.py`): `hourly_stale` (no `ok` hourly in 6 h),
+  `daily_stale` (no `ok` daily in 48 h), and `loop_stale` (no `trained` / `backtested` /
+  `rejected` / `shadow_started` / `promoted` / `candidate_queued` event in 8 days). The loop
+  check is armed only once a `retrain` pipeline run exists. Failed checks → `failed`, exit 1,
+  `HEALTHCHECKS_KEEPALIVE_URL/fail`. If the enable step fails, a final step pings `/fail` with curl.
+- **Deviation:** plan step 2 (status-branch commit < 48 h) is not built, because there is no
+  status branch (ADR-0011). The gate-liveness part of step 3 waits for `gate.yml`.
+- Secret name `HEALTHCHECKS_KEEPALIVE_URL` (was `HC_KEEPALIVE_URL` in `.env.example`), following
+  the `HEALTHCHECKS_*` names chosen on Day 4. It is optional.

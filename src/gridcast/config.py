@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     # Healthchecks.io ping URLs (secret-ish; never logged). Unset = the heartbeat is a no-op.
     healthchecks_hourly_url: str | None = None
     healthchecks_daily_url: str | None = None
+    healthchecks_keepalive_url: str | None = None
 
 
 def get_settings() -> Settings:
