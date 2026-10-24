@@ -56,24 +56,6 @@ class Deps:
     ping: runs.Pinger = runs.http_get
 
 
-class Notes:
-    """Run notes. `private` (with exception messages) goes to pipeline_runs; `public` (exception
-    type only: a driver message can name a database host) goes to logs and meta.json."""
-
-    def __init__(self) -> None:
-        self.private: list[str] = []
-        self.public: list[str] = []
-
-    def add(self, note: str) -> None:
-        self.private.append(note)
-        self.public.append(note)
-
-    def error(self, step: str, exc: BaseException) -> None:
-        first = str(exc).splitlines()[0][:200] if str(exc) else ""
-        self.private.append(f"{step}: {type(exc).__name__} {first}".strip())
-        self.public.append(f"{step}: {type(exc).__name__}")
-
-
 def catchup_candidates(engine: Engine, issue: datetime, hours: int) -> list[datetime]:
     if hours <= 0:
         return []
@@ -98,7 +80,7 @@ def _adequacy(engine: Engine, store: ObjectStore, deps: Deps, now: datetime) -> 
     try:
         counts = ieso_adequacy.ingest_recent(engine, deps.fetch, est_date(now), store=store)
     except Exception as exc:
-        n = Notes()
+        n = runs.Notes()
         n.error("adequacy", exc)
         runs.record(engine, "ieso_adequacy", slot, "scheduled", "failed", 0, n.private)
         return {"status": "failed", "notes": n}
@@ -107,7 +89,7 @@ def _adequacy(engine: Engine, store: ObjectStore, deps: Deps, now: datetime) -> 
 
 
 def _predict_hour(
-    engine: Engine, store: ObjectStore, issue: datetime, run_kind: str, notes: Notes
+    engine: Engine, store: ObjectStore, issue: datetime, run_kind: str, notes: runs.Notes
 ) -> dict[str, int]:
     wx = weather_snapshots.qualifying(engine, store, issue)
     if wx is None:
@@ -154,9 +136,9 @@ def run(
         out["heartbeat"] = runs.heartbeat(hc_url, True, deps.ping)
         return out
 
-    notes = Notes()
-    if isinstance(adequacy.get("notes"), Notes):
-        failed: Notes = adequacy.pop("notes")
+    notes = runs.Notes()
+    if isinstance(adequacy.get("notes"), runs.Notes):
+        failed: runs.Notes = adequacy.pop("notes")
         notes.private += failed.private
         notes.public += failed.public
     out["adequacy"] = adequacy
@@ -174,7 +156,7 @@ def run(
     written = 0
     out["catchup"] = {}
     for h in catchup_candidates(engine, issue, catchup_hours):
-        hour = Notes()
+        hour = runs.Notes()
         try:
             res = _predict_hour(engine, store, h, "catchup", hour)
             runs.record(engine, JOB, h, "catchup", "ok", sum(res.values()), hour.private)

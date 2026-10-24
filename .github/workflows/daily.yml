@@ -1,0 +1,62 @@
+name: daily
+
+# C11: PUB_Demand ingest (revisions) -> score every prediction whose final actual landed ->
+# peak_hours -> score_daily -> drift signals -> latest/scoreboard.json. CLI: gridcast run daily.
+#
+# 13:20Z = 08:20 EST, ~50 min after IESO's 07:30 EST PUB_Demand update; 18:20Z is the second
+# chance for a late file (the first slot ends `skipped`, not `ok`, while yesterday HE24 is
+# missing). No automatic retrain here: a full backtest takes ~104 min on 16 threads, so it does
+# not belong on a 4-vCPU runner yet (DATA_NOTES §18.3); permissions stay read-only.
+on:
+  schedule:
+    - cron: "20 13 * * *"
+    - cron: "20 18 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "EST date YYYY-MM-DD the run is for. Empty = today (EST)."
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: daily
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      OBJSTORE_ENDPOINT_URL: ${{ secrets.OBJSTORE_ENDPOINT_URL }}
+      OBJSTORE_REGION: ${{ secrets.OBJSTORE_REGION }}
+      OBJSTORE_ACCESS_KEY_ID: ${{ secrets.OBJSTORE_ACCESS_KEY_ID }}
+      OBJSTORE_SECRET_ACCESS_KEY: ${{ secrets.OBJSTORE_SECRET_ACCESS_KEY }}
+      OBJSTORE_BUCKET_PRIVATE: ${{ secrets.OBJSTORE_BUCKET_PRIVATE }}
+      OBJSTORE_BUCKET_PUBLIC: ${{ secrets.OBJSTORE_BUCKET_PUBLIC }}
+      # Optional: unset = no heartbeat.
+      HEALTHCHECKS_DAILY_URL: ${{ secrets.HEALTHCHECKS_DAILY_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.11 and runtime dependencies
+        run: |
+          uv python install 3.11
+          uv sync --locked --no-dev
+
+      - name: gridcast run daily
+        env:
+          RUN_DATE: ${{ inputs.date }}
+          RUN_KIND: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
+        run: |
+          args=(--run-kind "$RUN_KIND")
+          if [ -n "$RUN_DATE" ]; then args+=(--date "$RUN_DATE"); fi
+          uv run --no-sync gridcast run daily "${args[@]}"

@@ -22,6 +22,24 @@ from sqlalchemy.exc import IntegrityError
 Pinger = Callable[[str], object]
 
 
+class Notes:
+    """Run notes. `private` (with exception messages) goes to pipeline_runs; `public` (exception
+    type only: a driver message can name a database host) goes to logs and meta.json."""
+
+    def __init__(self) -> None:
+        self.private: list[str] = []
+        self.public: list[str] = []
+
+    def add(self, note: str) -> None:
+        self.private.append(note)
+        self.public.append(note)
+
+    def error(self, step: str, exc: BaseException) -> None:
+        first = str(exc).splitlines()[0][:200] if str(exc) else ""
+        self.private.append(f"{step}: {type(exc).__name__} {first}".strip())
+        self.public.append(f"{step}: {type(exc).__name__}")
+
+
 def start(engine: Engine, job: str, logical_time: datetime, run_kind: str) -> uuid.UUID:
     run_id = uuid.uuid4()
     with engine.begin() as conn:

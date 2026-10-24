@@ -99,16 +99,22 @@ class Clock:
         return self.now
 
 
-def ieso_fetch(pub_demand_body: Callable[[], str] | None = None) -> Callable[[str], Fetched]:
-    """Fake reports-public: empty Adequacy3 listing, every RealtimeTotals hour 404 (an outage),
-    PUB_Demand.csv from `pub_demand_body` when given (else 404)."""
+def ieso_fetch(
+    pub_demand: Callable[[], tuple[str, str]] | None = None,
+) -> Callable[[str], Fetched]:
+    """Fake reports-public: empty Adequacy3 listing, every RealtimeTotals hour 404 (an outage);
+    `pub_demand()` -> (versioned file name, body) is listed under /Demand/ (else 404)."""
 
     def fetch(url: str) -> Fetched:
         now = datetime.now(UTC)
         if url.endswith("/Adequacy3/"):
             return Fetched(url, 200, "<html></html>", now, None)
-        if url.endswith("PUB_Demand.csv") and pub_demand_body is not None:
-            return Fetched(url, 200, pub_demand_body(), now, None)
+        if pub_demand is not None:
+            name, body = pub_demand()
+            if url.endswith("/Demand/"):
+                return Fetched(url, 200, f'<a href="{name}">{name}</a>', now, None)
+            if url.endswith("/" + name):
+                return Fetched(url, 200, body, now, None)
         return Fetched(url, 404, "", now, None)
 
     return fetch
