@@ -85,9 +85,14 @@ def decide_bootstrap(
 
 
 def fit_final(
-    raw: pd.DataFrame, weather: pd.DataFrame, actuals: pd.Series, log: Callable[[str], None]
+    raw: pd.DataFrame,
+    weather: pd.DataFrame,
+    actuals: pd.Series,
+    log: Callable[[str], None],
+    profile: str = "full",
 ) -> LgbmForecaster:
-    """Fit the 24 boosters on every issue hour whose target has a final actual."""
+    """Fit the 24 boosters on every issue hour whose target has a final actual (the profile's
+    issue grid)."""
     fb = FeatureBuilder(DemandHistory.from_raw(raw), weather)
     last = actuals.index.max()
     # Last issue: every target has an actual (target <= last) or is dropped, and weather covers
@@ -99,11 +104,11 @@ def fit_final(
     issues = pd.date_range(TRAIN_START, end, freq="h", tz=UTC)
     issue_feats = fb.issue_frame(to_ns(issues))
     act = pd.Series(actuals.to_numpy(np.float64), index=to_ns(actuals.index))
-    model = LgbmForecaster()
+    model = LgbmForecaster(profile=profile)
     for h in range(1, 25):
         fr = fb.frame(issues, [h], issue=issue_feats)
         y = act.reindex(to_ns(fr["target_time"])).to_numpy()
-        ok = ~np.isnan(y)
+        ok = ~np.isnan(y) & lgbm_mod.keep_issue(to_ns(fr["issue_time"]), profile)
         model.fit_horizon(h, fr[ok], y[ok])
     log(f"final fit: {len(issues)} issue hours, last target {from_ns(to_ns([last]))[0]}")
     return model

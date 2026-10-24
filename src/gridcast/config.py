@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     healthchecks_hourly_url: str | None = None
     healthchecks_daily_url: str | None = None
     healthchecks_keepalive_url: str | None = None
+    healthchecks_retrain_url: str | None = None
 
 
 def get_settings() -> Settings:

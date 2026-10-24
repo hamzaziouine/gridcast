@@ -1236,3 +1236,33 @@ ieso_forecast_snapshots 2,064, ieso_adequacy_files 281, raw_demand_history 103,5
   status branch (ADR-0011). The gate-liveness part of step 3 waits for `gate.yml`.
 - Secret name `HEALTHCHECKS_KEEPALIVE_URL` (was `HC_KEEPALIVE_URL` in `.env.example`), following
   the `HEALTHCHECKS_*` names chosen on Day 4. It is optional.
+
+### 19.2 C18 fast retrain (`gridcast run retrain`, `retrain.yml`, ADR-0013)
+
+**Local measurement** (`OMP_NUM_THREADS=4 gridcast backtest --profile fast`, Neon data as of
+2026-10-24, same 12 folds as the champion, 19:41:07Z → 19:53:55Z, i.e. **12 min 48 s** wall,
+including the Neon load and ~11 s of issue-level features for 76,662 issue hours; a pytest run
+shared the machine for ~3 min): ~25 s per horizon for 12 folds, 288 booster fits.
+
+| model | pooled | winter | spring | summer | fall | peak | h 1–6 | h 7–12 | h 13–24 | coverage_80 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| lgbm `fast` | **2.627** | 2.029 | 2.598 | 3.213 | 2.654 | 3.191 | 2.433 | 2.597 | 2.738 | **0.828** (folds 11–12) |
+| lgbm `full` (§15) | 2.612 | 2.034 | 2.578 | 3.198 | 2.625 | 3.147 | 2.407 | 2.594 | 2.723 | 0.823 |
+
+Per fold (`fast`): 2.32, 3.31, 2.11, 2.01, 1.98, 2.56, 2.60, 2.62, 2.93, 3.18, 3.53, 2.34
+(`full`: 2.26, 3.27, 2.12, 2.01, 1.99, 2.55, 2.58, 2.59, 2.92, 3.12, 3.55, 2.35). Skill vs
+`seasonal_naive_168` 60.5 % (full 60.7 %). Cost of the speed-up: +0.015 MAPE points (+0.57 %
+relative), +0.044 peak points. Against the 104 min of the `full` run on 16 threads, the fit
+work is roughly 30× smaller (half the fits, half the rows, 63 bins).
+
+**What the gate does with it today:** the champion is `full`, so a `fast` candidate is a
+challenger and needs MAPE ≤ 0.98 × 2.612 = 2.560 on these folds. Expect `rejected` from every
+weekly run until a challenger really wins (ADR-0013 consequences).
+
+**Shadow rows:** when `models/shadow.json` exists, the hourly job writes 24 `shadow` rows per
+issue hour (from the shadow's `started_at`). That adds ≈ 210 k prediction + 210 k score rows a
+year (≈ 20 + 18 MB) while a shadow runs, inside the §14.4 headroom (371 → ≈ 410 MB worst case).
+
+**Drift → retrain:** `daily.retrain_trigger` (7-day MAPE breached 3 days running, ≥ 7 live days,
+no retrain in 72 h) → daily.yml `gh workflow run retrain.yml -f reason=drift:mape`. daily.yml now
+has `actions: write` for that call only.

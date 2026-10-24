@@ -225,8 +225,11 @@ def run_backtest(
     folds: Sequence[Fold] | None = None,
     with_lgbm: bool = True,
     log: Callable[[str], None] = print,
+    profile: str = "full",
 ) -> BacktestResult:
-    """Run the baselines (and LightGBM) over the folds; `actuals` = final Ontario Demand."""
+    """Run the baselines (and LightGBM) over the folds; `actuals` = final Ontario Demand.
+
+    `profile`: the LightGBM training profile (`models.lgbm.PROFILES`, ADR-0013)."""
     actuals = actuals.sort_index()
     last_actual = actuals.index.max().to_pydatetime()
     folds = list(folds or default_folds(last_actual))
@@ -288,9 +291,9 @@ def run_backtest(
     result_models: dict[int, Any] = {}
     offsets: IntervalOffsets | None = None
     if with_lgbm:
-        from gridcast.models.lgbm import LgbmForecaster
+        from gridcast.models.lgbm import LgbmForecaster, keep_issue
 
-        result_models = {f.k: LgbmForecaster() for f in folds}
+        result_models = {f.k: LgbmForecaster(profile=profile) for f in folds}
         # The issue grid stops where the weather can still cover all 24 targets.
         wx_last = pd.Timestamp(weather["valid_time"].max())
         last_end = min(pd.Timestamp(max(f.end for f in folds)), wx_last - pd.Timedelta(hours=24))
@@ -306,8 +309,9 @@ def run_backtest(
             fr = fb.frame(train_issues, [h], issue=issue_feats)
             y = _actual_lookup(actuals, to_ns(fr["target_time"]))
             tgt = to_ns(fr["target_time"])
+            keep = keep_issue(to_ns(fr["issue_time"]), profile)
             for f in folds:
-                tr = (tgt < to_ns([f.train_end])[0]) & ~np.isnan(y)
+                tr = (tgt < to_ns([f.train_end])[0]) & ~np.isnan(y) & keep
                 te_idx = test_pos.reindex(to_ns(test_sets[f.k])).to_numpy().astype(int)
                 train_rows, test_rows = fr[tr], fr.iloc[te_idx]
                 assert_asof(train_rows)

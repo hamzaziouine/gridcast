@@ -5,8 +5,9 @@ name: daily
 #
 # 13:20Z = 08:20 EST, ~50 min after IESO's 07:30 EST PUB_Demand update; 18:20Z is the second
 # chance for a late file (the first slot ends `skipped`, not `ok`, while yesterday HE24 is
-# missing). No automatic retrain here: a full backtest takes ~104 min on 16 threads, so it does
-# not belong on a 4-vCPU runner yet (DATA_NOTES §18.3); permissions stay read-only.
+# missing). A drift trigger (7-day MAPE > 1.5 x reference for 3 days, >= 7 live days, no retrain
+# in 72 h; ADR-0013) dispatches retrain.yml with reason drift:mape: the only reason this job has
+# `actions: write`. It never commits.
 on:
   schedule:
     - cron: "20 13 * * *"
@@ -30,6 +31,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      actions: write # gh workflow run retrain.yml on a drift trigger
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       OBJSTORE_ENDPOINT_URL: ${{ secrets.OBJSTORE_ENDPOINT_URL }}
@@ -53,6 +55,7 @@ jobs:
           uv sync --locked --no-dev
 
       - name: gridcast run daily
+        id: daily
         env:
           RUN_DATE: ${{ inputs.date }}
           RUN_KIND: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
@@ -60,3 +63,10 @@ jobs:
           args=(--run-kind "$RUN_KIND")
           if [ -n "$RUN_DATE" ]; then args+=(--date "$RUN_DATE"); fi
           uv run --no-sync gridcast run daily "${args[@]}"
+
+      - name: Dispatch retrain.yml on a drift trigger
+        if: steps.daily.outputs.retrain_reason != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REASON: ${{ steps.daily.outputs.retrain_reason }}
+        run: gh workflow run retrain.yml --repo "$GITHUB_REPOSITORY" --ref main -f reason="$REASON"

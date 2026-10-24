@@ -1,5 +1,6 @@
 """GridCast command-line interface (Typer)."""
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -128,8 +129,10 @@ def backtest(
         [], help="Fold month YYYY-MM (repeatable); default: the last 12 complete months."
     ),
     mlflow: bool = typer.Option(False, "--mlflow/--no-mlflow", help="Log the run to MLflow."),
+    profile: str = typer.Option("full", help="LightGBM training profile: full | fast."),
 ) -> None:
     """Rolling-origin backtest (12 monthly folds) of the baselines and LightGBM; prints tables."""
+    import time
     from datetime import date
 
     from gridcast.backtest.harness import Fold, load_actuals, run_backtest
@@ -143,7 +146,12 @@ def backtest(
     folds = [
         Fold(k, date.fromisoformat(m + "-01")) for k, m in enumerate(sorted(month), start=1)
     ] or None
-    res = run_backtest(raw, weather, actuals, folds=folds, with_lgbm=lgbm, log=typer.echo)
+    t0 = time.monotonic()
+
+    def log(msg: str) -> None:
+        typer.echo(f"[{time.monotonic() - t0:7.1f}s] {msg}")
+
+    res = run_backtest(raw, weather, actuals, folds=folds, with_lgbm=lgbm, log=log, profile=profile)
     typer.echo(res.lag_parity.to_string(index=False))
     typer.echo(res.summary().round(3).T.to_string())
     typer.echo(res.per_fold().round(2).to_string())
@@ -151,9 +159,9 @@ def backtest(
         from gridcast.backtest.harness import headline
         from gridcast.registry import mlflow_client
 
-        with mlflow_client.start_run("gridcast-backtest", "backtest"):
-            mlflow_client.log({"folds": ",".join(f.month.isoformat() for f in res.folds)},
-                              headline(res), {})  # fmt: skip
+        with mlflow_client.start_run("gridcast-backtest", f"backtest-{profile}"):
+            mlflow_client.log({"folds": ",".join(f.month.isoformat() for f in res.folds),
+                               "profile": profile}, headline(res), {})  # fmt: skip
 
 
 @app.command()
@@ -294,6 +302,50 @@ def run_daily(
         )
     finally:
         engine.dispose()
+    typer.echo(json.dumps(out, indent=1, default=str))
+    gh_output = os.environ.get("GITHUB_OUTPUT")
+    if gh_output:  # daily.yml dispatches retrain.yml on a drift trigger
+        with open(gh_output, "a", encoding="utf-8") as fh:
+            fh.write(f"retrain_reason={out.get('retrain_trigger') or ''}\n")
+    if out["status"] == "failed":
+        raise typer.Exit(code=1)
+
+
+@run_app.command("retrain")
+def run_retrain(
+    reason: str = typer.Option("manual", help="weekly | manual | drift:<rule>"),
+    profile: str = typer.Option("fast", help="LightGBM training profile: fast | full."),
+    run_kind: str = typer.Option("manual", help="scheduled | manual"),
+) -> None:
+    """Train a candidate, backtest it on the champion's folds, register shadow/queue/reject."""
+    import json
+    import time
+
+    import httpx
+
+    from gridcast.ingest import http
+    from gridcast.jobs import retrain
+    from gridcast.storage import objstore
+
+    t0 = time.monotonic()
+
+    def log(msg: str) -> None:
+        typer.echo(f"[{time.monotonic() - t0:7.1f}s] {msg}")
+
+    engine = _jobs_engine()
+    try:
+        with httpx.Client(
+            timeout=http.TIMEOUT_S, headers={"User-Agent": http.USER_AGENT}
+        ) as client:
+            deps = retrain.Deps(
+                fetch_weather=lambda u, p: http.fetch(u, params=p, client=client, attempts=6)
+            )
+            out = retrain.run(
+                engine, objstore.private_store(), deps, reason, profile, run_kind, log=log
+            )
+    finally:
+        engine.dispose()
+    out["runtime_s"] = round(time.monotonic() - t0, 1)
     typer.echo(json.dumps(out, indent=1, default=str))
     if out["status"] == "failed":
         raise typer.Exit(code=1)
