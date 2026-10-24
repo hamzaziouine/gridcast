@@ -1,0 +1,237 @@
+"""`gridcast predict --issue-time T` (C9): champion, baselines and IESO-as-of rows for one issue.
+
+- Champion: `models/champion.json` -> artifact (sha256 checked) + interval offsets.
+- Baselines: seasonal_naive_168 / _24 / persistence on the same as-of history; p10/p90 from each
+  baseline's own relative residuals over the 60 days before the cutoff, using only actuals
+  visible at the cutoff.
+- ieso_adequacy: per target, the latest Adequacy3 snapshot with created_at <= data_cutoff (plan
+  §3.0 decision 3: whatever its age); p10/p90 NULL; the snapshot created_at is the version.
+- Weather: `store` = weather_hourly (historical-forecast archive, synthetic stamps); `live` = one
+  Open-Meteo snapshot fetched now, usable only if fetched_at <= data_cutoff (in memory here; the
+  hourly job of C10 stores snapshots in the bucket).
+- Writes: champion rows insert-only (ON CONFLICT DO NOTHING, a published row is never rewritten);
+  baseline and IESO rows upsert (deterministic). run_kind defaults to 'manual'.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import uuid
+from collections.abc import Callable
+from datetime import datetime, timedelta
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from sqlalchemy import Connection, Engine, text
+
+from gridcast import contracts
+from gridcast.features.build import (
+    CUTOFF_NS,
+    LOOKBACK,
+    DemandHistory,
+    FeatureBuilder,
+    load_history,
+    load_weather,
+    to_ns,
+)
+from gridcast.ingest.availability import data_cutoff
+from gridcast.models.baselines import BASELINES, baseline_frame
+from gridcast.models.intervals import IntervalOffsets, fit_offsets
+from gridcast.models.lgbm import LgbmForecaster
+from gridcast.storage.objstore import ObjectStore
+from gridcast.timeutil import to_utc
+
+CHAMPION_KEY = "models/champion.json"
+BASELINE_WINDOW = timedelta(days=60)
+INSERT_ONLY = {"champion", "shadow", "prev_champion"}
+
+RUN_INSERT = (
+    "INSERT INTO prediction_runs (issue_time, model_id, run_id, run_kind)"
+    " VALUES (:i, :m, :r, :k) ON CONFLICT (issue_time, model_id) DO "
+)
+RUN_INSERT_ONLY = RUN_INSERT + "NOTHING"
+RUN_UPSERT = (
+    RUN_INSERT + "UPDATE SET run_id = EXCLUDED.run_id, run_kind = EXCLUDED.run_kind,"
+    " created_at = now()"
+)
+PRED_INSERT = (
+    "INSERT INTO predictions (issue_time, model_id, horizon, version_id, p50, p10, p90)"
+    " VALUES (:i, :m, :h, :v, :p50, :p10, :p90) ON CONFLICT (issue_time, model_id, horizon) DO "
+)
+PRED_INSERT_ONLY = PRED_INSERT + "NOTHING"  # a published champion row is never rewritten
+PRED_UPSERT = (
+    PRED_INSERT + "UPDATE SET version_id = EXCLUDED.version_id, p50 = EXCLUDED.p50,"
+    " p10 = EXCLUDED.p10, p90 = EXCLUDED.p90"
+)
+
+
+def _weather_live(
+    fetch_snapshot: Callable[[], tuple[pd.DataFrame, datetime]], cutoff: datetime
+) -> pd.DataFrame:
+    frame, fetched_at = fetch_snapshot()
+    if fetched_at > cutoff:
+        raise ValueError(
+            f"live snapshot fetched at {fetched_at:%H:%M:%SZ}, after data_cutoff {cutoff:%H:%MZ}:"
+            " it cannot be used for this issue time"
+        )
+    frame = frame.copy()
+    frame["available_at"] = pd.Timestamp(fetched_at)
+    return frame
+
+
+def baseline_rows(history: DemandHistory, issue: datetime) -> pd.DataFrame:
+    issue_ns = to_ns([issue])
+    rows = baseline_frame(history, issue_ns)
+    cut = issue_ns[0] + CUTOFF_NS
+    past = pd.date_range(issue - BASELINE_WINDOW, issue - timedelta(hours=1), freq="h")
+    hist = baseline_frame(history, to_ns(past))
+    tgt = to_ns(hist["target_time"])
+    actual, _ = history.ontario.lookup(tgt, np.full(len(tgt), cut))  # only actuals visible now
+    hist["actual"] = actual
+    for name in BASELINES:
+        off = fit_offsets(hist[hist["model_name"] == name], 1.0, "trailing 60 d, visible actuals")
+        m = rows["model_name"] == name
+        p10, p90 = off.apply(rows.loc[m, "p50"].to_numpy(), rows.loc[m, "horizon"].to_numpy())
+        rows.loc[m, "p10"], rows.loc[m, "p90"] = p10, p90
+    rows["model_version"] = rows["model_name"]
+    return rows.drop(columns=["input_available_at"])
+
+
+def ieso_rows(engine: Engine, issue: datetime) -> pd.DataFrame:
+    cutoff = data_cutoff(issue)
+    targets = [issue + timedelta(hours=h) for h in range(1, 25)]
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            text(
+                "SELECT DISTINCT ON (target_time) target_time, energy_mw::float8 AS p50, created_at"
+                " FROM ieso_forecast_snapshots WHERE target_time = ANY(:t) AND created_at <= :c"
+                " ORDER BY target_time, created_at DESC"
+            ),
+            conn,
+            params={"t": targets, "c": cutoff},
+        )
+    df["target_time"] = pd.to_datetime(df["target_time"], utc=True)
+    df["issue_time"] = pd.Timestamp(issue)
+    df["horizon"] = ((df["target_time"] - df["issue_time"]).dt.total_seconds() // 3600).astype(int)
+    df["model_name"] = "ieso_adequacy"
+    df["model_version"] = [pd.Timestamp(c).tz_convert("UTC").isoformat() for c in df["created_at"]]
+    df["p10"] = np.nan
+    df["p90"] = np.nan
+    return df.drop(columns=["created_at"])
+
+
+def champion_rows(
+    store: ObjectStore, frame: pd.DataFrame, history: DemandHistory, issue: datetime
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    champ = store.get_json(CHAMPION_KEY)
+    out = frame[["issue_time", "target_time"]].copy()
+    out["horizon"] = frame["horizon"].astype(int)
+    out["model_name"] = "champion"
+    out["model_version"] = champ["model_version"]
+    if champ["model_name"] == "lgbm":
+        blob = store.get_bytes(champ["artifact_key"])
+        if hashlib.sha256(blob).hexdigest() != champ["sha256"]:
+            raise ValueError("champion artifact sha256 mismatch")
+        model = LgbmForecaster.from_bytes(blob)
+        offsets = IntervalOffsets.from_json(store.get_bytes(champ["intervals_key"]))
+        out["p50"] = model.predict(frame)
+        out["p10"], out["p90"] = offsets.apply(out["p50"].to_numpy(), out["horizon"].to_numpy())
+    elif champ["model_name"] == "seasonal_naive_168":  # bootstrap-fallback champion
+        b = baseline_rows(history, issue)
+        b = b[b["model_name"] == "seasonal_naive_168"].set_index("horizon")
+        for c in ("p10", "p50", "p90"):
+            out[c] = b.loc[out["horizon"], c].to_numpy()
+    else:
+        raise ValueError(f"unknown champion model {champ['model_name']!r}")
+    return out, champ
+
+
+def _version_ids(conn: Connection, versions: list[str]) -> dict[str, int]:
+    conn.execute(
+        text(
+            "INSERT INTO model_versions (model_version) SELECT unnest(CAST(:v AS text[]))"
+            " ON CONFLICT (model_version) DO NOTHING"
+        ),
+        {"v": versions},
+    )
+    rows = conn.execute(
+        text("SELECT model_version, version_id FROM model_versions WHERE model_version = ANY(:v)"),
+        {"v": versions},
+    ).all()
+    return {str(r[0]): int(r[1]) for r in rows}
+
+
+def write_predictions(
+    engine: Engine, rows: pd.DataFrame, run_id: uuid.UUID, run_kind: str
+) -> dict[str, int]:
+    """Write rows (contract-checked) into predictions / prediction_runs. Returns rows per model."""
+    contracts.Predictions.validate(rows)
+    written: dict[str, int] = {}
+    with engine.begin() as conn:
+        ids: dict[str, int] = {
+            str(n): int(i)
+            for n, i in conn.execute(text("SELECT model_name, model_id FROM prediction_models"))
+        }
+        vids = _version_ids(conn, sorted(set(rows["model_version"])))
+        issue = rows["issue_time"].iloc[0].to_pydatetime()
+        for name, g in rows.groupby("model_name"):
+            insert_only = name in INSERT_ONLY
+            run_sql = RUN_INSERT_ONLY if insert_only else RUN_UPSERT
+            conn.execute(
+                text(run_sql), {"i": issue, "m": ids[str(name)], "r": run_id, "k": run_kind}
+            )
+
+            def opt(x: float) -> float | None:
+                return None if np.isnan(x) else float(x)
+
+            params = [
+                {"i": issue, "m": ids[str(name)], "h": int(h), "v": vids[str(v)],
+                 "p50": float(p50), "p10": opt(p10), "p90": opt(p90)}
+                for h, v, p50, p10, p90 in zip(
+                    g["horizon"].to_numpy(int), g["model_version"].to_numpy(str),
+                    g["p50"].to_numpy(np.float64), g["p10"].to_numpy(np.float64),
+                    g["p90"].to_numpy(np.float64), strict=True,
+                )
+            ]  # fmt: skip
+            res = conn.execute(text(PRED_INSERT_ONLY if insert_only else PRED_UPSERT), params)
+            written[str(name)] = int(res.rowcount or 0)
+    return written
+
+
+def run(
+    engine: Engine,
+    store: ObjectStore,
+    issue_time: datetime,
+    weather: str = "store",
+    fetch_snapshot: Callable[[], tuple[pd.DataFrame, datetime]] | None = None,
+    run_kind: str = "manual",
+) -> dict[str, Any]:
+    issue = to_utc(issue_time)
+    cutoff = data_cutoff(issue)
+    raw = load_history(engine, issue - BASELINE_WINDOW - LOOKBACK, issue + timedelta(hours=1))
+    if weather == "live":
+        if fetch_snapshot is None:
+            raise ValueError("live weather needs a snapshot fetcher")
+        wx = _weather_live(fetch_snapshot, cutoff)
+    else:
+        wx = load_weather(engine, issue - timedelta(hours=30), issue + timedelta(hours=24))
+    history = DemandHistory.from_raw(raw)
+    frame = FeatureBuilder(history, wx).frame([issue])  # assert_asof inside
+    champ_rows, champ = champion_rows(store, frame, history, issue)
+    parts = [champ_rows, baseline_rows(history, issue), ieso_rows(engine, issue)]
+    rows = pd.concat(parts, ignore_index=True)[
+        ["issue_time", "target_time", "horizon", "model_name", "model_version", "p10", "p50", "p90"]
+    ]
+    rows["issue_time"] = pd.to_datetime(rows["issue_time"], utc=True)
+    rows["target_time"] = pd.to_datetime(rows["target_time"], utc=True)
+    written = write_predictions(engine, rows, uuid.uuid4(), run_kind)
+    counts = rows.groupby("model_name").size().to_dict()
+    return {
+        "issue_time": issue.isoformat(),
+        "data_cutoff": cutoff.isoformat(),
+        "champion": f"{champ['model_name']} {champ['model_version']} ({champ['champion_status']})",
+        "rows_built": {str(k): int(v) for k, v in counts.items()},
+        "rows_written": written,
+        "max_input_available_at": str(frame["input_available_at"].max()),
+    }

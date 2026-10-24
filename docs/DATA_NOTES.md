@@ -961,3 +961,50 @@ train from a cached feature Parquet.
 MLflow ≥ 3 refuses the plain `./mlruns` file store (`MLFLOW_ALLOW_FILE_STORE` needed), so the local
 fallback is SQLite `./mlruns/mlflow.db` with artifacts in `./mlruns/` (git-ignored); setting
 `MLFLOW_TRACKING_URI` switches to DagsHub with no code change.
+
+---
+
+## 16. C9 — `gridcast train`, the bootstrap champion and the first prediction rows (2026-10-24)
+
+**Training run** (`gridcast train`, Neon + R2, 2026-10-23 23:2xZ → 2026-10-24 01:1xZ): the
+backtest reproduced §15 exactly (deterministic seeds: pooled MAPE 2.612 %, skill 60.7 %, held-out
+coverage 0.823); the final fit used every hour from 2018-01-02 whose 24 targets have weather.
+Artifacts in the private bucket under `models/lgbm-2026.10.23-49ca/`: `model.json.gz`
+(sha256 `49ca5a49…ab4409`), `intervals.v0001.json`, `backtest.json`. MLflow run
+`00560ff0f3cd4ca7ada0c86d28764272` (local store, experiment `gridcast-train`).
+
+**Failure and fix.** After ~2 h of CPU the first `model_registry_events` insert failed with
+`psycopg.OperationalError: consuming input failed: SSL connection has been closed unexpectedly`:
+Neon had scaled the compute to zero and the SQLAlchemy pool handed back the dead connection.
+Fix: `db.make_engine` now sets `pool_pre_ping=True`. `train` was split so the registry and bootstrap
+step (`jobs/train.register`) is idempotent and can run alone on an uploaded artifact
+(`gridcast train --register-only <version> --mlflow-run-id <id>`, sha256 re-checked from the
+bucket, numbers read from the artifact's `backtest.json`); it was run that way, so the 2-hour
+training was not repeated. Two latent bugs found by the new end-to-end test were also fixed:
+the training/final-fit issue grids now stop where the weather store can cover all 24 targets
+(`weather_hourly` ends 10-22 23:00Z, before the last actual 10-23 04:00Z), and NaN metrics are
+written to `jsonb` as `null`.
+
+**Bootstrap (§4.7, ADR-0010): target met → `reason='bootstrap'`, `champion_status='ok'`.**
+
+```
+models/champion.json = {"model_name": "lgbm", "model_version": "lgbm-2026.10.23-49ca",
+ "artifact_key": "models/lgbm-2026.10.23-49ca/model.json.gz", "sha256": "49ca5a49…",
+ "feature_schema_version": 1, "promoted_at": "2026-10-24T01:18:02Z",
+ "mlflow_run_id": "00560ff0f3cd4ca7ada0c86d28764272", "champion_status": "ok",
+ "bootstrap_reason": "bootstrap", "intervals_key": "models/lgbm-2026.10.23-49ca/intervals.v0001.json"}
+model_registry_events: 1 trained, 2 backtested, 3 promoted (reason 'bootstrap', triggered_by 'manual')
+```
+
+**First prediction rows.** `ingest realtime` + `ingest adequacy` (9 new versions, archived to R2),
+then `gridcast predict --issue-time 2026-10-24T01:00:00 --weather live` at 01:21Z (live
+Open-Meteo snapshot fetched 01:21:08Z ≤ cutoff 01:30Z): 24 rows each for `champion`,
+`seasonal_naive_168`, `seasonal_naive_24`, `persistence`, `ieso_adequacy` = 120 rows,
+`run_kind='manual'`. IESO snapshot ages 37 and 457 min (the D+1 hours come from the 07:57 EST issue,
+as §0 item 3 predicted). Sample p50 (MW): h1 champion 15,277 / IESO 15,500 / sn168 15,222;
+h24 15,146 / 15,311 / 15,269.
+
+**Why `--weather live`:** `weather_hourly` (historical archive) ends 2026-10-22 23:00Z and the
+Adequacy3 history starts with delivery date 2026-10-23, so no past hour has both full weather and
+IESO coverage from the store. A recent past hour needs the live snapshot; it must be fetched no
+later than `issue_time + 30 min`. C10 stores these snapshots in the bucket.

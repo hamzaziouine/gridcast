@@ -47,8 +47,13 @@ def migration_url() -> str:
 
 
 def make_engine(url: str, **kwargs: Any) -> Engine:
-    """Engine with prepared statements disabled (required behind Neon's PgBouncer pooler)."""
+    """Engine with prepared statements disabled (required behind Neon's PgBouncer pooler).
+
+    `pool_pre_ping` is on: Neon closes idle connections when the compute scales to zero (5 min),
+    and a long job (training) would otherwise reuse a dead pooled connection.
+    """
     connect_args = {"prepare_threshold": None, **kwargs.pop("connect_args", {})}
+    kwargs.setdefault("pool_pre_ping", True)
     return create_engine(normalize_url(url), connect_args=connect_args, **kwargs)
 
 
