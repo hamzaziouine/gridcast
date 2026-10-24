@@ -1307,3 +1307,33 @@ has `actions: write` for that call only.
   variable `PUBLIC_API_URL` is set (the Worker is not deployed yet). It runs `GET /health`, needs
   `"stale":false`, and pings optional `HEALTHCHECKS_API_URL` (`/fail` otherwise). It is
   `continue-on-error`, so it never touches the forecast's status.
+
+### 19.4 First `retrain.yml` run (workflow_dispatch, run 40128743334) and the MLflow run-id repoint
+
+```
+2026-10-24 20:12:26Z dispatched (reason=manual, profile=fast); runner: 4 vCPU, 15 GB RAM
+  [  3.7s] weather refresh 2026-10: hours=552 written=24        (10-23 added)
+  [ 10.4s] loaded raw=103572 weather=77232 actuals=103536       (Neon)
+  [ 13.6s] issue-level features for 76662 hourly issue times
+  [ 43.2s .. 678.5s] lgbm h=1..24, ~27.5 s per horizon (12 folds)
+  [738.9s] final fit: 77184 issue hours, last target 2026-10-24 05:00Z
+  MLflow (DagsHub) gridcast-retrain run e2bbb7ea634d441cb33576d1d96ee1b2
+  candidate lgbm-2026.10.24-3709: kind=challenger (champion profile full)
+  MAPE 2.630 vs 0.98 x 2.612 = 2.560 (+0.70 %); held-out coverage_80 0.824 in band
+  decision: rejected      (events 4 trained, 5 backtested, 6 rejected)
+  runtime_s 759.4; job 20:12:26 -> 20:25:24Z = 13 min; champion.json untouched
+```
+
+The runner's 2.630 against the local 2.627 (same folds, same data up to fold ends) is
+cross-platform floating-point difference: LightGBM's `deterministic=True` holds on one platform,
+not between Windows and Linux builds. The weekly run reaches 13 min against the 60 min target
+and the 90 min timeout.
+
+**Run-id repoint** (`scripts/repoint_mlflow_run_ids.py --apply`, 2026-10-24 ~20:35Z). The Day-3
+local runs were copied to DagsHub as `19dc3a899b1b4f1eb895c43274f0d7f5` (train; tag
+`migrated_from_local_run_id=00560ff0…`) and `aecef0f962014095965dd7854ab176be` (backtest). Both
+were verified with `MlflowClient.get_run`: `FINISHED`, `lgbm_mape` 2.6118. Events 1–3 now carry
+the DagsHub id, with the old one kept in `metrics.mlflow_local_run_id`. `models/champion.json`
+`mlflow_run_id` was changed the same way, and no other field. A second run changes nothing.
+Logged as an `INTERVENTION`-class data repair (plan §12), done once by hand from a script in
+the repo.
