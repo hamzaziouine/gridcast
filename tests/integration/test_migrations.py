@@ -1,4 +1,4 @@
-"""P0.3 + 0002 + 0003: migrations apply cleanly to PostgreSQL 16, re-run and round-trip."""
+"""P0.3 + 0002 + 0003 + 0004: migrations apply cleanly to PostgreSQL 16, re-run and round-trip."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ TABLES = {
     "prediction_runs",
     "ieso_adequacy_files",
 }
-VIEWS = {"raw_demand", "v_training_base", "v_predictions"}
+VIEWS = {"raw_demand", "v_training_base", "v_predictions", "v_scores"}
 API_RO_TABLES = {
     "predictions",
     "scores",
@@ -92,7 +92,7 @@ def test_all_objects_exist(migrated_url: str) -> None:
         assert _relations(conn, "v") >= VIEWS
         assert _relations(conn, "i") >= INDEXES
         version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "0003_compact_predictions"
+        assert version == "0004_compact_scores"
         server = conn.execute(text("SHOW server_version_num")).scalar_one()
         assert int(server) >= 160000
     engine.dispose()
@@ -257,6 +257,49 @@ def test_v_predictions_restores_the_plan_columns(migrated_url: str) -> None:
             ),
             {"v": vid},
         )
+    engine.dispose()
+
+
+def test_v_scores_derives_the_plan_columns(migrated_url: str) -> None:
+    engine = db.make_engine(migrated_url)
+    with engine.begin() as conn:
+        vid = conn.execute(
+            text(
+                "INSERT INTO model_versions (model_version) VALUES ('lgbm-score-test')"
+                " ON CONFLICT (model_version) DO UPDATE SET model_version = EXCLUDED.model_version"
+                " RETURNING version_id"
+            )
+        ).scalar_one()
+        conn.execute(
+            text(
+                "INSERT INTO prediction_runs (issue_time, model_id, run_id, run_kind)"
+                " VALUES ('2026-11-01 10:00Z', 1, :run, 'scheduled')"
+            ),
+            {"run": uuid.uuid4()},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO predictions (issue_time, model_id, horizon, version_id, p50, p10, p90)"
+                " VALUES ('2026-11-01 10:00Z', 1, 5, :v, 15000, 14000, 16000)"
+            ),
+            {"v": vid},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO scores (target_time, model_id, horizon, actual_revision, actual_mw)"
+                " VALUES ('2026-11-01 15:00Z', 1, 5, 2, 16500)"
+            )
+        )
+        row = conn.execute(text("SELECT * FROM v_scores")).mappings().one()
+    assert str(row["issue_time"].astimezone(UTC)) == "2026-11-01 10:00:00+00:00"
+    assert row["model_name"] == "champion" and row["model_version"] == "lgbm-score-test"
+    assert row["actual_source"] == "pub_demand" and row["actual_revision"] == 2
+    assert row["err_mw"] == pytest.approx(-1500)
+    assert row["abs_pct_err"] == pytest.approx(1500 / 16500)
+    assert row["pinball_50"] == pytest.approx(750)
+    assert row["pinball_90"] == pytest.approx(0.9 * 500)
+    assert row["pinball_10"] == pytest.approx(0.1 * 2500)
+    assert row["in_80_interval"] is False
     engine.dispose()
 
 

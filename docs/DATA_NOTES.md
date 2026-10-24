@@ -915,6 +915,50 @@ to ≈ 100 B/row ≈ 147 MB, or ≈ 100 MB if the 90-day prune also covers the s
 names (their `score_daily` aggregates stay). With that: ≈ 74 + 7 + 96 + 105 + 100–147 ≈ 380–430 MB.
 The `ieso_forecast_snapshots` row (222 B: `source_file` text duplicated by the ledger, `numeric`
 MW) could shrink the same way, to ≈ 35 MB/year. `zonal_actuals` (Phase D, ~40 MB) comes on top.
+→ Done before the first score row: §14.4.
+
+### 14.4 Compact `scores` (migration `0004_compact_scores`, 2026-10-24) and the new projection
+
+`scores` was empty, so 0004 drops and re-creates it. A score row stores only what is not
+derivable: `target_time`, `model_id smallint`, `horizon smallint`, `actual_revision smallint`,
+`actual_mw real` (the actual it was scored against). The view `v_scores` joins `predictions`
+and returns the plan's §4.3 columns (`issue_time`, `model_name`, `model_version`, `err_mw`,
+`abs_pct_err`, `pinball_10/50/90`, `in_80_interval`, `actual_source` = `'pub_demand'` always).
+`scored_at` is dropped (`pipeline_runs` records when the daily job ran). One index, the PK
+**(target_time, model_id, horizon)**: the daily job scores one EST day of targets per batch,
+oldest first, so each batch appends at the right-most leaf. Keyed by `issue_time` instead,
+consecutive daily batches interleave (the issue times of day D's targets overlap day D−1's by
+23 h) and split mid-index pages.
+
+**Measured on PostgreSQL 16.2 (embedded pgserver), 604,800 rows = 150 EST days × 24 targets × 7
+names × 24 horizons, written in the daily job's order (one COPY per target day, sorted by each
+table's PK), `VACUUM ANALYZE`, `pg_total_relation_size`** (`scripts/measure_scores_size.py`):
+
+```
+PostgreSQL 16.2; 604,800 score rows (150 EST days x 24 x 7 models x 24)
+scores after 0003_compact_predictions: 133.3 MB, 220.4 B/row
+scores after 0004_compact_scores: 50.6 MB, 83.7 B/row
+```
+
+(The 0001 layout measured 198.7 B/row in §14.2 when filled in pure PK order; in the daily
+job's batch order its issue-first key costs 220.4 B/row.)
+
+**Year-one projection** (1.47 M scorable prediction rows; the 90-day prune of
+`seasonal_naive_24`, `persistence` and `prev_champion` predictions is to delete their score rows
+in the same statement, leaving ≈ 1.00 M):
+
+| | MB, year one |
+|---|---:|
+| today (demand, actuals, weather, rest) | 74 |
+| demand + actuals + weather growth | 7 |
+| predictions, 0003 layout (1.00 M × 96.2 B) | 96 |
+| ieso_forecast_snapshots with retention | 105 |
+| **scores, 0004 layout (1.00 M × 83.7 B)** | **84** (was 292) |
+| hourly bookkeeping (`pipeline_runs` ≈ 26 k rows, `weather_snapshot_index` 8.8 k rows) | ≈ 5 |
+| **total** | **≈ 371 MB** (74 % of 500; target ≤ 430 met) |
+
+Without the scores prune (all 1.47 M rows kept): 123 MB → ≈ 410 MB, still ≤ 430.
+`zonal_actuals` (Phase D, ~40 MB) would bring the pruned total to ≈ 411 MB.
 
 ---
 
