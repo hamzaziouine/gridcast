@@ -75,16 +75,18 @@ def catchup_candidates(engine: Engine, issue: datetime, hours: int) -> list[date
     return [r[0].astimezone(UTC) for r in rows]
 
 
-def _adequacy(engine: Engine, store: ObjectStore, deps: Deps, now: datetime) -> dict[str, Any]:
+def _adequacy(
+    engine: Engine, store: ObjectStore, deps: Deps, now: datetime, run_kind: str
+) -> dict[str, Any]:
     slot = now.replace(second=0, microsecond=0)
     try:
         counts = ieso_adequacy.ingest_recent(engine, deps.fetch, est_date(now), store=store)
     except Exception as exc:
         n = runs.Notes()
         n.error("adequacy", exc)
-        runs.record(engine, "ieso_adequacy", slot, "scheduled", "failed", 0, n.private)
+        runs.record(engine, "ieso_adequacy", slot, run_kind, "failed", 0, n.private)
         return {"status": "failed", "notes": n}
-    status = runs.record(engine, "ieso_adequacy", slot, "scheduled", "ok", counts["rows"])
+    status = runs.record(engine, "ieso_adequacy", slot, run_kind, "ok", counts["rows"])
     return {"status": status, **counts}
 
 
@@ -128,7 +130,7 @@ def run(
     issue = floor_hour(issue_time or now)
     hc_url = get_settings().healthchecks_hourly_url
     out: dict[str, Any] = {"issue_time": issue.isoformat(), "run_kind": run_kind}
-    adequacy = _adequacy(engine, store, deps, now)
+    adequacy = _adequacy(engine, store, deps, now, run_kind)
 
     run_id = runs.start(engine, JOB, issue, run_kind)
     if runs.already_ok(engine, JOB, issue):
