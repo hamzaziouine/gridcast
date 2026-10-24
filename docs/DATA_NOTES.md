@@ -1110,3 +1110,65 @@ later than `issue_time + 30 min`. C10 stores these snapshots in the bucket.
 | step 9b deep `/health` probe + `HC_API_URL` | not built | the Worker host has no DB; UptimeRobot on `/health` is the external probe (C16) |
 | champion cached in the Actions cache by sha256 | in-process cache only (one download per run) | the artifact is small; R2 egress is free |
 | `jobs hourly` | `run hourly` | orchestrator's Day-4 brief |
+
+---
+
+## 18. C11 — the daily job (`gridcast run daily`, `.github/workflows/daily.yml`, 2026-10-24)
+
+`src/gridcast/jobs/daily.py` (steps and the `scoreboard.json` schema in its docstring).
+
+### 18.1 What it does
+
+- Cron `20 13 * * *` (08:20 EST, ~50 min after the 07:30 EST `PUB_Demand` update) and
+  `20 18 * * *`. logical_time = 00:00 EST of the run's EST day; the first slot ends `skipped`
+  (not `ok`) while yesterday HE24 is still missing, so the 18:20 slot retries.
+- Ingest reads the directory listing and downloads the newest **versioned**
+  `PUB_Demand_<year>_vNNN.csv` (plus last year's in January), observed stamps. Bug avoided:
+  `raw_demand_history` is keyed by `(target_time, source, file_name)`, so reading the
+  unsuffixed `PUB_Demand.csv` every day would make the next day's revision of the provisional
+  HE1 collide with the version it revises (`ON CONFLICT DO NOTHING`) and be lost. The
+  integration test exercises two successive revisions.
+- Scores: every prediction whose target has an actual, targets in the 45 EST days before the
+  run's day (that day's provisional HE1 is excluded); inserted in target order; re-scored in
+  place when `actuals.revision` or the value moves.
+- `peak_hours`, `score_daily` (45-day delete + insert, `final_only = true`, 4 horizon bands) as
+  plan §4.3/§6.2.
+
+### 18.2 Drift signals (plan §6.2 step 4, error-based part)
+
+`drift_metrics` rows per run (run_time = the logical time, idempotent upsert), each with
+`consecutive_days` of breach in `context`:
+
+| metric | value | threshold / breach |
+|---|---|---|
+| `rolling_mape_7d` | champion MAPE, last 7 EST days | > 1.5 × `ref_mape_30d` |
+| `ref_mape_30d` | champion MAPE, trailing 30 d excl. the last 7 — the backtest MAPE (`model_registry_events` `backtested.lgbm_mape`) until 30 live days exist | – |
+| `naive_mape_7d` | `seasonal_naive_168` MAPE, last 7 days (context: a shared breach = weather regime) | – |
+| `coverage_30d` | champion 80 % coverage, 30 days | outside [0.72, 0.88] |
+| `neon_storage_mb` | `pg_database_size` | warn > 400 (context), **fail > 450** (§6.2 step 6c) |
+
+Not built: PSI (Evidently, season-matched reference histograms — needs `reference_hist.parquet`
+from retrain), `l0_lag_parity` (plan: "once live, W2"), the Neon CU-h/egress guard (needs
+`NEON_API_KEY`).
+
+### 18.3 Why no retrain trigger, and permissions
+
+The plan wires breach → `gh workflow run retrain.yml` in the daily job (§6.2 step 4, permissions
+`contents: write, actions: write`). C11's "done when" (§9 Day 5) is the minimum without drift
+actions, and a full `gridcast train` backtest took **104 min on a 16-thread laptop** (§15): on a
+4-vCPU runner that is several hours, past any sane `timeout-minutes`. So the daily job only
+**records** the signals; nothing dispatches a retrain, `retrain.yml` does not exist yet, and
+`daily.yml` keeps `contents: read`. The status-branch commit (§6.2 step 6, C15) is not built
+either, so `contents: write` is not needed yet. Levers before wiring retrain (C17): drop the
+refit and keep the early-stopped probe, `max_bin` 63, a 2-hourly training grid, cached feature
+Parquet.
+
+### 18.4 Deviations (C11)
+
+| Plan | Built | Why |
+|---|---|---|
+| `jobs daily`; `HC_DAILY_URL` | `run daily`; `HEALTHCHECKS_DAILY_URL` (optional) | orchestrator's Day-4 brief |
+| status-branch `scoreboard.json` + `metrics.json` + SVG | `latest/scoreboard.json` in the public bucket | Worker host reads the bucket; status branch is C15 |
+| 6b: fail when `score_daily` has no row for yesterday | not a check | with < 1 day of live forecasts it would fail every run; revisit at C16 |
+| `gridcast intervals recalibrate` (step 3b) | not built | needs ≥ 14 days of live residuals (earliest 2026-11-07) |
+| scores keyed by (issue, target, model_name) | (target_time, model_id, horizon) | §14.4 |

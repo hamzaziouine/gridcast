@@ -268,6 +268,37 @@ def run_hourly(
         raise typer.Exit(code=1)
 
 
+@run_app.command("daily")
+def run_daily(
+    day: str = typer.Option("", "--date", help="EST date YYYY-MM-DD; default today (EST)."),
+    run_kind: str = typer.Option("scheduled", help="scheduled | catchup | manual"),
+    publish: bool = typer.Option(True, "--publish/--no-publish", help="Write scoreboard.json."),
+) -> None:
+    """PUB_Demand ingest, scoring, peak hours, score_daily, drift signals, scoreboard.json."""
+    import json
+    from datetime import date
+
+    from gridcast.ingest import http
+    from gridcast.jobs import daily
+    from gridcast.storage import objstore
+
+    engine = _jobs_engine()
+    try:
+        out = daily.run(
+            engine,
+            objstore.private_store(),
+            objstore.public_store() if publish else None,
+            daily.Deps(fetch=http.fetch),
+            day=date.fromisoformat(day) if day else None,
+            run_kind=run_kind,
+        )
+    finally:
+        engine.dispose()
+    typer.echo(json.dumps(out, indent=1, default=str))
+    if out["status"] == "failed":
+        raise typer.Exit(code=1)
+
+
 @prune_app.command("adequacy")
 def prune_adequacy(
     vacuum_full: bool = typer.Option(
