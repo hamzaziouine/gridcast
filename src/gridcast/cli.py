@@ -20,6 +20,10 @@ ingest_app = typer.Typer(help="Ingest live IESO files.", no_args_is_help=True)
 app.add_typer(ingest_app, name="ingest")
 prune_app = typer.Typer(help="Storage hygiene (retention rules).", no_args_is_help=True)
 app.add_typer(prune_app, name="prune")
+run_app = typer.Typer(help="Scheduled jobs (what the GitHub workflows run).", no_args_is_help=True)
+app.add_typer(run_app, name="run")
+
+ISSUE_TIME_FORMATS = ["%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]
 
 
 @app.callback()
@@ -218,6 +222,50 @@ def predict(
     finally:
         engine.dispose()
     typer.echo(json.dumps(out, indent=1, default=str))
+
+
+@run_app.command("hourly")
+def run_hourly(
+    issue_time: datetime | None = typer.Option(  # noqa: B008 - Typer's documented pattern
+        None,
+        "--issue-time",
+        formats=ISSUE_TIME_FORMATS,
+        help="Default: floor(now). No offset means UTC.",
+    ),
+    run_kind: str = typer.Option("scheduled", help="scheduled | catchup | manual"),
+    catchup_hours: int = typer.Option(6, help="Missed issue hours to back-fill honestly."),
+    publish: bool = typer.Option(True, "--publish/--no-publish", help="Write latest/*.json."),
+) -> None:
+    """Ingest realtime + adequacy, snapshot weather, forecast (with catch-up), publish."""
+    import json
+
+    from gridcast.ingest import http, openmeteo
+    from gridcast.jobs import hourly
+    from gridcast.storage import objstore
+
+    issue = None
+    if issue_time is not None:
+        issue = issue_time if issue_time.tzinfo else issue_time.replace(tzinfo=UTC)
+    deps = hourly.Deps(
+        fetch=http.fetch,
+        fetch_snapshot=lambda: openmeteo.fetch_live(lambda u, p: http.fetch(u, params=p)),
+    )
+    engine = _jobs_engine()
+    try:
+        out = hourly.run(
+            engine,
+            objstore.private_store(),
+            objstore.public_store() if publish else None,
+            deps,
+            issue_time=issue,
+            run_kind=run_kind,
+            catchup_hours=catchup_hours,
+        )
+    finally:
+        engine.dispose()
+    typer.echo(json.dumps(out, indent=1, default=str))
+    if out["status"] == "failed":
+        raise typer.Exit(code=1)
 
 
 @prune_app.command("adequacy")

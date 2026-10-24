@@ -45,6 +45,7 @@ from gridcast.timeutil import to_utc
 CHAMPION_KEY = "models/champion.json"
 BASELINE_WINDOW = timedelta(days=60)
 INSERT_ONLY = {"champion", "shadow", "prev_champion"}
+_MODEL_CACHE: dict[tuple[str, str], tuple[LgbmForecaster, IntervalOffsets]] = {}
 
 RUN_INSERT = (
     "INSERT INTO prediction_runs (issue_time, model_id, run_id, run_kind)"
@@ -130,11 +131,16 @@ def champion_rows(
     out["model_name"] = "champion"
     out["model_version"] = champ["model_version"]
     if champ["model_name"] == "lgbm":
-        blob = store.get_bytes(champ["artifact_key"])
-        if hashlib.sha256(blob).hexdigest() != champ["sha256"]:
-            raise ValueError("champion artifact sha256 mismatch")
-        model = LgbmForecaster.from_bytes(blob)
-        offsets = IntervalOffsets.from_json(store.get_bytes(champ["intervals_key"]))
+        cache_key = (champ["sha256"], champ["intervals_key"])
+        if cache_key not in _MODEL_CACHE:  # one download per process (catch-up runs several hours)
+            blob = store.get_bytes(champ["artifact_key"])
+            if hashlib.sha256(blob).hexdigest() != champ["sha256"]:
+                raise ValueError("champion artifact sha256 mismatch")
+            _MODEL_CACHE[cache_key] = (
+                LgbmForecaster.from_bytes(blob),
+                IntervalOffsets.from_json(store.get_bytes(champ["intervals_key"])),
+            )
+        model, offsets = _MODEL_CACHE[cache_key]
         out["p50"] = model.predict(frame)
         out["p10"], out["p90"] = offsets.apply(out["p50"].to_numpy(), out["horizon"].to_numpy())
     elif champ["model_name"] == "seasonal_naive_168":  # bootstrap-fallback champion
@@ -206,21 +212,36 @@ def run(
     weather: str = "store",
     fetch_snapshot: Callable[[], tuple[pd.DataFrame, datetime]] | None = None,
     run_kind: str = "manual",
+    weather_frame: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
+    """`weather`: 'store' | 'live' | 'frame' (use `weather_frame`, e.g. an archived snapshot) |
+    'none' (no weather may be used: champion skipped, baselines and IESO still written)."""
     issue = to_utc(issue_time)
     cutoff = data_cutoff(issue)
     raw = load_history(engine, issue - BASELINE_WINDOW - LOOKBACK, issue + timedelta(hours=1))
+    wx: pd.DataFrame | None
     if weather == "live":
         if fetch_snapshot is None:
             raise ValueError("live weather needs a snapshot fetcher")
         wx = _weather_live(fetch_snapshot, cutoff)
+    elif weather == "frame":
+        if weather_frame is None:
+            raise ValueError("weather='frame' needs weather_frame")
+        wx = weather_frame
+    elif weather == "none":
+        wx = None
     else:
         wx = load_weather(engine, issue - timedelta(hours=30), issue + timedelta(hours=24))
     history = DemandHistory.from_raw(raw)
-    frame = FeatureBuilder(history, wx).frame([issue])  # assert_asof inside
-    champ_rows, champ = champion_rows(store, frame, history, issue)
-    parts = [champ_rows, baseline_rows(history, issue), ieso_rows(engine, issue)]
-    rows = pd.concat(parts, ignore_index=True)[
+    parts = [baseline_rows(history, issue), ieso_rows(engine, issue)]
+    champ: dict[str, Any] | None = None
+    max_avail = None
+    if wx is not None:
+        frame = FeatureBuilder(history, wx).frame([issue])  # assert_asof inside
+        champ_rows, champ = champion_rows(store, frame, history, issue)
+        parts.insert(0, champ_rows)
+        max_avail = str(frame["input_available_at"].max())
+    rows = pd.concat([p for p in parts if not p.empty], ignore_index=True)[
         ["issue_time", "target_time", "horizon", "model_name", "model_version", "p10", "p50", "p90"]
     ]
     rows["issue_time"] = pd.to_datetime(rows["issue_time"], utc=True)
@@ -230,8 +251,12 @@ def run(
     return {
         "issue_time": issue.isoformat(),
         "data_cutoff": cutoff.isoformat(),
-        "champion": f"{champ['model_name']} {champ['model_version']} ({champ['champion_status']})",
+        "champion": (
+            f"{champ['model_name']} {champ['model_version']} ({champ['champion_status']})"
+            if champ
+            else None
+        ),
         "rows_built": {str(k): int(v) for k, v in counts.items()},
         "rows_written": written,
-        "max_input_available_at": str(frame["input_available_at"].max()),
+        "max_input_available_at": max_avail,
     }
