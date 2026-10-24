@@ -1052,3 +1052,61 @@ h24 15,146 / 15,311 / 15,269.
 Adequacy3 history starts with delivery date 2026-10-23, so no past hour has both full weather and
 IESO coverage from the store. A recent past hour needs the live snapshot; it must be fetched no
 later than `issue_time + 30 min`. C10 stores these snapshots in the bucket.
+
+---
+
+## 17. C10 — the hourly job (`gridcast run hourly`, `.github/workflows/hourly.yml`, 2026-10-24)
+
+`src/gridcast/jobs/hourly.py` (steps in its docstring), `ingest/weather_snapshots.py`,
+`jobs/publish.py`, `jobs/runs.py`.
+
+### 17.1 Cadence and cron
+
+- Cron `7,27 * * * *` (the plan's two slots). At :07 the L0 hour (`issue − REALTIME_LAG_H`, 1 h)
+  has been complete since :53–:57 of the previous hour (§1.4), and the live weather snapshot is
+  fetched ~23 min before `data_cutoff = issue + 30 min`, which absorbs GitHub's usual cron delay.
+  The :27 slot queues behind :07 in the `hourly` concurrency group (`cancel-in-progress: false`)
+  and ends `skipped` once :07 wrote `ok`; it still ingests the ~:25 Adequacy3 reissue.
+- A run that starts after the cutoff cannot use its own snapshot (`available_at = fetched_at` >
+  cutoff); it falls back to the newest earlier snapshot that covers the hour, as catch-up does.
+- `REALTIME_LAG_H` stays at the provisional 1 (§1.4's day-long observation is still open).
+
+### 17.2 Weather snapshots (the as-of record for live weather)
+
+- One snapshot per UTC hour slot: `weather/snapshots/YYYY/MM/DD/HH.parquet` in the private bucket
+  (72 rows × 54 columns) + a `weather_snapshot_index` row with
+  `available_at = fetched_at` (observed). A slot that already has one is not fetched again.
+- Hour H may use a snapshot only if `available_at ≤ H + 30 min` and it covers `H − 23 h … H + 24 h`
+  (the 24 h rolling weather features need the 23 h before the first target). The newest such
+  snapshot wins. Current hour and catch-up hours use the same rule, so a missed hour never sees a
+  forecast fetched after its cutoff.
+
+### 17.3 Catch-up, degradation, idempotency
+
+- Catch-up: the last 6 issue hours with no champion row and no `ok` hourly run, oldest first,
+  `run_kind='catchup'`, each with its own cutoff. No qualifying snapshot → no champion row
+  (visible gap); baselines and `ieso_adequacy` are still written; the hour gets an `ok`
+  (`catchup`) `pipeline_runs` row with a note so it is not retried every hour. A catch-up hour
+  that errors is recorded `failed` and retried by the next run.
+- IESO outages never fail the job (§3.0 item 6): RealtimeTotals 404/partial hours are counted and
+  skipped (the feature builder falls back up to 5 h for L0); an Adequacy3 listing/download error
+  marks only the `ieso_adequacy` sub-row `failed`; a newest Adequacy3 snapshot older than 6 h is
+  a note (`adequacy_stale`), not a failure. **Deviation from plan §6.1 step 8b**, which fails
+  the run on stale Adequacy3: the orchestrator's rule (IESO outages degrade, never fail) wins.
+- The run is `failed` (exit 1, Healthchecks `/fail`) only when the issue hour lacks its 24
+  champion rows (no qualifying weather, model or database error) or publishing failed.
+- Re-running the same issue hour is `skipped` (dedupe on `pipeline_runs`); champion rows are
+  insert-only, baseline/IESO rows are deterministic upserts.
+- Notes with exception messages go to `pipeline_runs.notes` only; logs and `meta.json` get the
+  step and exception type (a driver message can name the database host; the repo is public).
+
+### 17.4 Deviations from the plan (C10)
+
+| Plan | Built | Why |
+|---|---|---|
+| publish `api/v1/forecast/latest.json`, `api/v1/health.json`, … | `latest/forecast.json`, `latest/meta.json` (+ `latest/scoreboard.json` daily), schema in `jobs/publish.py` | orchestrator's Day-4 brief; the Worker maps them to `/v1/*` |
+| `HC_HOURLY_URL` / `HC_DAILY_URL` | `HEALTHCHECKS_HOURLY_URL` / `HEALTHCHECKS_DAILY_URL`, optional | orchestrator's Day-4 brief; `.env.example` updated |
+| step 8 quick score each hour | none; scoring is daily only | §3.0 decision 1 (no provisional actuals) |
+| step 9b deep `/health` probe + `HC_API_URL` | not built | the Worker host has no DB; UptimeRobot on `/health` is the external probe (C16) |
+| champion cached in the Actions cache by sha256 | in-process cache only (one download per run) | the artifact is small; R2 egress is free |
+| `jobs hourly` | `run hourly` | orchestrator's Day-4 brief |

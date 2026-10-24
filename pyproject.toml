@@ -22,6 +22,7 @@ dependencies = [
     "holidays>=0.107",
     "boto3>=1.43.118",
     "mlflow-skinny>=3.17.2",
+    "pyarrow>=17",
 ]
 
 [project.scripts]

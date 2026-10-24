@@ -1,0 +1,62 @@
+name: hourly
+
+# C10: ingest RealtimeTotals + Adequacy3, archive the live weather snapshot, forecast the current
+# issue hour (with honest catch-up of missed hours), publish latest/*.json. CLI: gridcast run hourly.
+#
+# Cron minutes (DATA_NOTES §17.1): a complete RealtimeTotals hour lands at :53-:57 of the hour it
+# covers, so at :07 the L0 hour (issue - REALTIME_LAG_H = 1 h) is in; the weather snapshot must be
+# fetched before data_cutoff = issue + 30 min, so :07 leaves ~23 min for GitHub's cron delay. The
+# :27 slot is the second chance: it queues behind :07 (same concurrency group) and is `skipped`
+# once :07 wrote `ok`, but it still ingests the ~:25 Adequacy3 reissue.
+on:
+  schedule:
+    - cron: "7,27 * * * *"
+  workflow_dispatch:
+    inputs:
+      issue_time:
+        description: "Issue hour, UTC (e.g. 2026-10-24T15:00:00). Empty = the current hour."
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: hourly
+  cancel-in-progress: false
+
+jobs:
+  hourly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      OBJSTORE_ENDPOINT_URL: ${{ secrets.OBJSTORE_ENDPOINT_URL }}
+      OBJSTORE_REGION: ${{ secrets.OBJSTORE_REGION }}
+      OBJSTORE_ACCESS_KEY_ID: ${{ secrets.OBJSTORE_ACCESS_KEY_ID }}
+      OBJSTORE_SECRET_ACCESS_KEY: ${{ secrets.OBJSTORE_SECRET_ACCESS_KEY }}
+      OBJSTORE_BUCKET_PRIVATE: ${{ secrets.OBJSTORE_BUCKET_PRIVATE }}
+      OBJSTORE_BUCKET_PUBLIC: ${{ secrets.OBJSTORE_BUCKET_PUBLIC }}
+      # Optional: unset = no heartbeat.
+      HEALTHCHECKS_HOURLY_URL: ${{ secrets.HEALTHCHECKS_HOURLY_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.11 and runtime dependencies
+        run: |
+          uv python install 3.11
+          uv sync --locked --no-dev
+
+      - name: gridcast run hourly
+        env:
+          ISSUE_TIME: ${{ inputs.issue_time }}
+          RUN_KIND: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
+        run: |
+          args=(--run-kind "$RUN_KIND")
+          if [ -n "$ISSUE_TIME" ]; then args+=(--issue-time "$ISSUE_TIME"); fi
+          uv run --no-sync gridcast run hourly "${args[@]}"

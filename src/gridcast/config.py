@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     database_url_direct: str | None = None
     database_url_ro: str | None = None
     gridcast_env: str = "dev"
+    # Healthchecks.io ping URLs (secret-ish; never logged). Unset = the heartbeat is a no-op.
+    healthchecks_hourly_url: str | None = None
+    healthchecks_daily_url: str | None = None
 
 
 def get_settings() -> Settings:

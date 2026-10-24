@@ -105,6 +105,12 @@ def private_store(read_only: bool = False, settings: ObjstoreSettings | None = N
     return ObjectStore(make_client(s, read_only), s.bucket_private)
 
 
+def public_store(settings: ObjstoreSettings | None = None) -> ObjectStore:
+    """The public bucket (published JSON snapshots), with the read-write jobs credentials."""
+    s = settings or ObjstoreSettings()
+    return ObjectStore(make_client(s), s.bucket_public)
+
+
 def configured(settings: ObjstoreSettings | None = None) -> bool:
     s = settings or ObjstoreSettings()
     return bool(s.access_key_id and s.secret_access_key)
