@@ -1,7 +1,8 @@
 // GridCast public API (Worker host, BUILD_PLAN §3.0 item 8).
 // Deployed by Cloudflare Workers Builds from this directory (root directory = infra/worker).
 // Reads the JSON snapshots the hourly/daily jobs publish to the R2 bucket gridcast-public
-// (binding PUBLIC). No secrets, no database credential.
+// (binding PUBLIC). No database credential. Cron Triggers dispatch hourly.yml / daily.yml through
+// the GitHub API (ADR-0014); the only secret is GH_DISPATCH_TOKEN, set in the dashboard.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "gridcast",
@@ -9,5 +10,6 @@
   "compatibility_date": "2026-09-01",
   "workers_dev": true,
   "observability": { "enabled": true },
-  "r2_buckets": [{ "binding": "PUBLIC", "bucket_name": "gridcast-public" }]
+  "r2_buckets": [{ "binding": "PUBLIC", "bucket_name": "gridcast-public" }],
+  "triggers": { "crons": ["2,22 * * * *", "20 13,18 * * *"] }
 }

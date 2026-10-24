@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import worker from "../src/index.js";
+import worker, { dispatch } from "../src/index.js";
 
 function bucket(objects) {
   return {
@@ -84,4 +84,25 @@ test("index, trailing slash, preflight and method checks", async () => {
   assert.equal((await call("/v1/scoreboard/", sb)).status, 200);
   assert.equal((await call("/v1/scoreboard", {}, "OPTIONS")).status, 204);
   assert.equal((await call("/v1/scoreboard", {}, "POST")).status, 405);
+});
+
+test("cron dispatch: no-op without token, POSTs workflow_dispatch on main with it", async () => {
+  assert.equal((await dispatch("2,22 * * * *", {})).status, "no-token");
+  assert.equal((await dispatch("* * * * *", { GH_DISPATCH_TOKEN: "t" })).status, "unknown-cron");
+  const calls = [];
+  const fake = async (url, init) => {
+    calls.push({ url, init });
+    return new Response(null, { status: 204 });
+  };
+  const r = await dispatch("20 13,18 * * *", { GH_DISPATCH_TOKEN: "t" }, fake);
+  assert.equal(r.status, "dispatched");
+  assert.equal(
+    calls[0].url,
+    "https://api.github.com/repos/hamzaziouine/gridcast/actions/workflows/daily.yml/dispatches",
+  );
+  assert.equal(calls[0].init.headers.authorization, "Bearer t");
+  assert.deepEqual(JSON.parse(calls[0].init.body), { ref: "main" });
+  const bad = await dispatch("2,22 * * * *", { GH_DISPATCH_TOKEN: "t" }, async () =>
+    new Response(null, { status: 403 }));
+  assert.equal(bad.status, "http-403");
 });

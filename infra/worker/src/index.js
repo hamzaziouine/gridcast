@@ -84,7 +84,39 @@ async function health(env, now) {
   return json({ ...body, last_issue_time: null, stale: true }, 200, "no-store");
 }
 
+// External scheduler (ADR-0014): GitHub's own cron drops and delays runs, so Cloudflare Cron
+// Triggers also dispatch the jobs. Duplicates are harmless (per-hour success, concurrency groups).
+// No-op until the Worker secret GH_DISPATCH_TOKEN (fine-grained PAT, Actions: write on this repo)
+// is set.
+const REPO = "hamzaziouine/gridcast";
+export const DISPATCH = { "2,22 * * * *": "hourly.yml", "20 13,18 * * *": "daily.yml" };
+
+export async function dispatch(cron, env, fetchImpl = fetch) {
+  const workflow = DISPATCH[cron];
+  if (!workflow) return { cron, status: "unknown-cron" };
+  if (!env.GH_DISPATCH_TOKEN) return { cron, workflow, status: "no-token" };
+  const res = await fetchImpl(
+    `https://api.github.com/repos/${REPO}/actions/workflows/${workflow}/dispatches`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${env.GH_DISPATCH_TOKEN}`,
+        accept: "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+        "user-agent": "gridcast-worker",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ ref: "main" }),
+    },
+  );
+  return { cron, workflow, status: res.status === 204 ? "dispatched" : `http-${res.status}` };
+}
+
 export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(dispatch(event.cron, env).then((r) => console.log(JSON.stringify(r))));
+  },
+
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") {
