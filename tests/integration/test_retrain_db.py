@@ -150,7 +150,10 @@ def test_drift_trigger_needs_3_days_7_live_days_and_respects_the_cooldown(env: A
 
     def rows(breached: bool, days: int, live: int) -> list[dict[str, Any]]:
         ctx = {"consecutive_days": days, "live_days": live}
-        return [{"metric": "rolling_mape_7d", "br": breached, "ctx": json.dumps(ctx)}]
+        return [
+            {"metric": "rolling_mape_7d", "value": 4.0, "br": breached, "ctx": json.dumps(ctx)},
+            {"metric": "ref_mape_30d", "value": 2.6, "br": False, "ctx": json.dumps(ctx)},
+        ]
 
     later = datetime.now(UTC) + timedelta(days=4)  # past the 72 h cooldown of the runs above
     assert daily.retrain_trigger(eng, rows(True, 3, 7), later) == "drift:mape"

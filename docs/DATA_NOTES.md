@@ -1173,9 +1173,8 @@ assumed float32 and fewer columns); casting to float32 would halve it if it ever
 | `coverage_30d` | champion 80 % coverage, 30 days | outside [0.72, 0.88] |
 | `neon_storage_mb` | `pg_database_size` | warn > 400 (context), **fail > 450** (§6.2 step 6c) |
 
-Not built: PSI (Evidently, season-matched reference histograms — needs `reference_hist.parquet`
-from retrain), `l0_lag_parity` (plan: "once live, W2"), the Neon CU-h/egress guard (needs
-`NEON_API_KEY`).
+PSI and `l0_lag_parity`: built on Day 5 (§19.3). Still not built: the Neon CU-h/egress guard
+(needs `NEON_API_KEY`).
 
 ### 18.3 Why no retrain trigger, and permissions
 
@@ -1195,8 +1194,8 @@ Parquet.
 |---|---|---|
 | `jobs daily`; `HC_DAILY_URL` | `run daily`; `HEALTHCHECKS_DAILY_URL` (optional) | orchestrator's Day-4 brief |
 | status-branch `scoreboard.json` + `metrics.json` + SVG | `latest/scoreboard.json` in the public bucket | Worker host reads the bucket; status branch is C15 |
-| 6b: fail when `score_daily` has no row for yesterday | not a check | with < 1 day of live forecasts it would fail every run; revisit at C16 |
-| `gridcast intervals recalibrate` (step 3b) | not built | needs ≥ 14 days of live residuals (earliest 2026-11-07) |
+| 6b: fail when `score_daily` has no row for yesterday | built Day 5, armed only after ≥ 1 full live day (§19.3) | with < 1 day of live forecasts it would fail every run |
+| `gridcast intervals recalibrate` (step 3b) | built Day 5 inside the daily job (§19.3); acts from ≥ 14 live days (earliest ≈ 2026-11-08) | |
 | scores keyed by (issue, target, model_name) | (target_time, model_id, horizon) | §14.4 |
 
 ### 18.5 First real run (Neon + R2, 2026-10-24 17:10:52Z, 37 s)
@@ -1266,3 +1265,45 @@ year (≈ 20 + 18 MB) while a shadow runs, inside the §14.4 headroom (371 → �
 **Drift → retrain:** `daily.retrain_trigger` (7-day MAPE breached 3 days running, ≥ 7 live days,
 no retrain in 72 h) → daily.yml `gh workflow run retrain.yml -f reason=drift:mape`. daily.yml now
 has `actions: write` for that call only.
+
+### 19.3 Drift and ops checks (daily job; migration `0005_live_features`)
+
+- **`live_features`** (new table, additive migration applied to Neon 2026-10-24 ~20:25Z before the
+  code that writes it was pushed): one row per champion issue hour with the horizon-1 PSI
+  features and `mkt_l0_age_h`, insert-only, written by `predict.run`. A write error is a note,
+  never a failed forecast. ≈ 8.8 k rows/year, < 1 MB.
+- **PSI** (`drift/psi.py`, `drift/checks.py`): 8 features (`temperature_2m_w`,
+  `apparent_temperature_w`, `dew_point_2m_w`, `hdd_w`, `cdd_w`, `shortwave_radiation_w`,
+  `wind_speed_10m_w`, `ont_lag168`). The last 14 EST days of `live_features` are compared with
+  the champion's training rows whose target day-of-year is within ±15 days of a window day;
+  10 quantile bins from that slice, epsilon 1e-4. A value equal to an edge goes to the lower
+  bin, so a point mass (`cdd_w = 0` all winter) is a single bin. It needs ≥ 7 days of live rows,
+  else no rows and a note. `drift_metrics` row per feature (`metric='psi'`, `feature=<name>`,
+  threshold 0.25, `consecutive_days`).
+  **Deviation:** numpy instead of Evidently, and a reference **sample**
+  (`models/<version>/reference_features.parquet`, 77,184 h = 1 rows, 2.43 MB, float32) instead of
+  per-day-of-year histograms. Season matching happens at read time, so the same file serves
+  every window. Built for the current champion with `gridcast drift reference` (27 s) on
+  2026-10-24; `retrain` writes one for every candidate. That champion was trained on weather to
+  2026-10-22; its reference runs to 10-23, one extra day out of 77 k rows.
+- **`l0_lag_parity`**: the mean live `mkt_l0_age_h` over the last 24 issue hours vs
+  `REALTIME_LAG_H` (1 h); breached when they differ by > 1 h. The context holds the share of
+  fallback hours and the max lag. It is a diagnostic: nothing retrains on it automatically.
+- **Triggers** (`daily.retrain_trigger`), both needing ≥ 7 live days and no retrain in 72 h:
+  `drift:mape` (§19.2) and `drift:psi+mape`, which fires when PSI > 0.25 on ≥ 2 features for 3
+  days and the 7-day MAPE is > 1.2 × the reference. `drift:psi+mape` is suppressed while a shadow
+  runs (§4.7 item 7). The coverage rule recalibrates, it does not retrain.
+- **Interval recalibration** (§4.5 (ii)): from ≥ 14 EST days of final-scored live residuals of
+  the current champion version, each daily run writes `intervals.vNNNN.json` (per-horizon
+  10/90 % relative-residual quantiles, trailing min(60, available) days, no allowance) and
+  repoints `champion.json.intervals_key` (other fields unchanged; `intervals_recalibrated_on`
+  makes it idempotent per day). It also logs `interval_recalibrated`. `seasonal_naive_168`
+  already refits its offsets on the trailing 60 days at every prediction.
+- **`score_daily_missing`** (§6.2 step 6b): `failed` when champion forecasts targeted yesterday
+  but no champion `score_daily` row exists for it. Armed only once the first champion issue is
+  ≥ 1 h before yesterday began (so ≥ 1 full day of live data), and only when forecasts did hit
+  yesterday. A day with no forecast at all is the hourly job's alarm.
+- **Public API probe** (§6.1 step 9b): an hourly.yml step that does nothing until the repository
+  variable `PUBLIC_API_URL` is set (the Worker is not deployed yet). It runs `GET /health`, needs
+  `"stale":false`, and pings optional `HEALTHCHECKS_API_URL` (`/fail` otherwise). It is
+  `continue-on-error`, so it never touches the forecast's status.

@@ -1,4 +1,4 @@
-"""P0.3 + 0002 + 0003 + 0004: migrations apply cleanly to PostgreSQL 16, re-run and round-trip."""
+"""P0.3 + 0002 .. 0005: migrations apply cleanly to PostgreSQL 16, re-run and round-trip."""
 
 from __future__ import annotations
 
@@ -38,6 +38,7 @@ TABLES = {
     "model_versions",
     "prediction_runs",
     "ieso_adequacy_files",
+    "live_features",
 }
 VIEWS = {"raw_demand", "v_training_base", "v_predictions", "v_scores"}
 API_RO_TABLES = {
@@ -92,7 +93,7 @@ def test_all_objects_exist(migrated_url: str) -> None:
         assert _relations(conn, "v") >= VIEWS
         assert _relations(conn, "i") >= INDEXES
         version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "0004_compact_scores"
+        assert version == "0005_live_features"
         server = conn.execute(text("SHOW server_version_num")).scalar_one()
         assert int(server) >= 160000
     engine.dispose()
