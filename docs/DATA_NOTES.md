@@ -1111,6 +1111,31 @@ later than `issue_time + 30 min`. C10 stores these snapshots in the bucket.
 | champion cached in the Actions cache by sha256 | in-process cache only (one download per run) | the artifact is small; R2 egress is free |
 | `jobs hourly` | `run hourly` | orchestrator's Day-4 brief |
 
+### 17.5 First real runs (Neon + R2, local `.env`, 2026-10-24)
+
+```
+16:57:54Z gridcast run hourly --run-kind manual   (issue 16:00Z, 2 min 36 s)
+  adequacy: listed=5539 pending=94 files=20 rows=480 pruned=0
+  realtime: due=6 fetched=6 inserted=6 missing=0 partial=0
+  weather: stored (slot 16, fetched ~16:59Z > cutoff 16:30Z -> unusable for 16:00Z)
+  catch-up 10:00-15:00Z: no snapshot existed -> baselines + IESO only (4 x 24 rows each)
+  status=failed: champion rows for issue_time 0/24   <- honest: started 28 min after the hour
+17:01:13Z gridcast run hourly --run-kind manual   (issue 17:00Z, 2 min 16 s)
+  adequacy: pending=74 files=20 rows=480 pruned=216
+  realtime: stored_before=5 inserted=1
+  weather: stored (slot 17, fetched 17:01Z <= cutoff 17:30Z)
+  catch-up 16:00Z: the 16:59Z snapshot is after its 16:30Z cutoff -> gap, baselines + IESO
+  rows_written: champion 24, ieso_adequacy 24, persistence 24, seasonal_naive_168 24,
+                seasonal_naive_24 24; status=ok
+  published: latest/forecast.json 5,739 B, latest/meta.json 955 B
+```
+
+The Adequacy3 backlog (94 versions since the last ingest on 10-24 01:2xZ) drains at the plan's cap
+of 20 files per run (~66 s per run at ~3.3 s per file); later runs only see the ~2 new versions
+per hour. Weather snapshots measure **49.4 kB** each (Parquet, 72 × 55, float64), ≈ 430 MB/year
+in the private bucket — inside R2's 10 GB, but ~14× the plan's 30 MB/year estimate (the plan
+assumed float32 and fewer columns); casting to float32 would halve it if it ever matters.
+
 ---
 
 ## 18. C11 — the daily job (`gridcast run daily`, `.github/workflows/daily.yml`, 2026-10-24)
@@ -1172,3 +1197,19 @@ Parquet.
 | 6b: fail when `score_daily` has no row for yesterday | not a check | with < 1 day of live forecasts it would fail every run; revisit at C16 |
 | `gridcast intervals recalibrate` (step 3b) | not built | needs ≥ 14 days of live residuals (earliest 2026-11-07) |
 | scores keyed by (issue, target, model_name) | (target_time, model_id, horizon) | §14.4 |
+
+### 18.5 First real run (Neon + R2, 2026-10-24 17:10:52Z, 37 s)
+
+```
+gridcast run daily --run-kind manual   (day 2026-10-24 EST)
+  pub_demand_rows: 25 (10-23 HE1..HE24 + the provisional 10-24 HE1)
+  scores: inserted 15 (the 10-24 01:00Z issue's h1-h3 x 5 models: targets before 10-24 05:00Z)
+  peak_hours: 1,080 (45 days x 24)   score_daily: 10 rows   drift_metrics: 5 rows
+  drift: rolling_mape_7d 3.199 (3 champion pairs), ref_mape_30d 2.612 (backtest), naive_mape_7d
+         2.454, coverage_30d 1.0 (breached: 3 pairs, noise), neon_storage_mb 74.9
+  published: latest/scoreboard.json 3,411 B; newest_actual 2026-10-24T05:00:00Z; status=ok
+```
+
+Neon after both jobs: `pg_database_size` = **74,956,800 B (75.0 MB)**; predictions 912 rows,
+prediction_runs 38, scores 15, score_daily 10, peak_hours 1,080, weather_snapshot_index 2,
+ieso_forecast_snapshots 2,064, ieso_adequacy_files 281, raw_demand_history 103,570, actuals 103,536.
