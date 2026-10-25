@@ -15,6 +15,10 @@ on:
     - cron: "2,12,22 * * * *"
   workflow_dispatch:
     inputs:
+      scheduler:
+        description: "Set by the Cloudflare Worker cron (ADR-0014): 'cloudflare' = a scheduled run."
+        required: false
+        default: ""
       issue_time:
         description: "Issue hour, UTC (e.g. 2026-10-24T15:00:00). Empty = the current hour."
         required: false
@@ -57,7 +61,7 @@ jobs:
       - name: gridcast run hourly
         env:
           ISSUE_TIME: ${{ inputs.issue_time }}
-          RUN_KIND: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
+          RUN_KIND: ${{ (github.event_name == 'schedule' || inputs.scheduler == 'cloudflare') && 'scheduled' || 'manual' }}
         run: |
           args=(--run-kind "$RUN_KIND")
           if [ -n "$ISSUE_TIME" ]; then args+=(--issue-time "$ISSUE_TIME"); fi

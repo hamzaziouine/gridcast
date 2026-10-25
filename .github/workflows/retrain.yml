@@ -5,13 +5,23 @@ name: retrain
 # `candidate_queued` or `rejected` (§4.7 steps 1 and 6). It never writes champion.json; promotion
 # is the gate's job after >= 14 days of shadow. Measured: the fast backtest (288 booster fits)
 # takes ~13 min on 4 threads locally (DATA_NOTES §19.2); the timeout leaves room for a slow runner.
+#
+# Two schedulers start the weekly run (ADR-0014): this `schedule:` and the Cloudflare Worker cron
+# `0 3 * * SUN` (workflow_dispatch, reason=weekly). Duplicates cannot train twice: the
+# `model-registry` concurrency group serialises them, and a `weekly` run is keyed on its weekly
+# slot (the latest Sunday 03:00 UTC), so a second run for a slot that already ended `ok` exits
+# `skipped` before any download or training (a few seconds of Neon).
 on:
   schedule:
     - cron: "0 3 * * 0" # weekly, Sunday 03:00 UTC (plan, decided)
   workflow_dispatch:
     inputs:
+      scheduler:
+        description: "Set by the Cloudflare Worker cron (ADR-0014): 'cloudflare' = a scheduled run."
+        required: false
+        default: ""
       reason:
-        description: "Why (manual, drift:mape, ...). Recorded in the registry."
+        description: "Why (manual, drift:mape, weekly, ...). 'weekly' runs at most once per weekly slot."
         required: false
         default: "manual"
       profile:
@@ -65,5 +75,5 @@ jobs:
         env:
           REASON: ${{ github.event_name == 'schedule' && 'weekly' || inputs.reason }}
           PROFILE: ${{ inputs.profile || 'fast' }}
-          RUN_KIND: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
+          RUN_KIND: ${{ (github.event_name == 'schedule' || inputs.scheduler == 'cloudflare') && 'scheduled' || 'manual' }}
         run: uv run --no-sync gridcast run retrain --reason "$REASON" --profile "$PROFILE" --run-kind "$RUN_KIND"

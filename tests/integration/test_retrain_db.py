@@ -161,3 +161,38 @@ def test_drift_trigger_needs_3_days_7_live_days_and_respects_the_cooldown(env: A
     assert daily.retrain_trigger(eng, rows(True, 3, 6), later) is None  # not a 7-day MAPE yet
     assert daily.retrain_trigger(eng, rows(False, 0, 30), later) is None
     assert daily.retrain_trigger(eng, rows(True, 5, 30), datetime.now(UTC)) is None  # cooldown
+
+
+def test_weekly_runs_train_once_per_slot_whoever_starts_them(env: Any) -> None:
+    """ADR-0014: GitHub cron and the Cloudflare cron both start the weekly run. The second start
+    for the same slot (even hours late, or on Monday) ends `skipped` before any work."""
+    eng, store, mp = env
+    mp.setattr(retrain, "backtest_stage", lambda *a: retrain.StageResult(False, "forced fail"))
+    sunday = datetime(2024, 4, 7, 3, 0, 40, tzinfo=UTC)  # Cloudflare start, seconds late
+
+    def weekly(now: datetime, run_kind: str = "scheduled") -> dict[str, Any]:
+        deps = retrain.Deps(fetch_weather=weather_down, now=lambda: now)
+        return retrain.run(eng, store, deps, "weekly", "fast", run_kind, log=lambda _: None)
+
+    n_events = len(_events(eng))
+    first = weekly(sunday)
+    assert first["status"] == "ok" and first["decision"] == "rejected"
+    assert first["logical_time"] == "2024-04-07T03:00:00+00:00"
+    assert len(_events(eng)) == n_events + 3  # trained, backtested, rejected
+    for late in (sunday + timedelta(hours=3), sunday + timedelta(hours=22)):  # GitHub, Monday
+        again = weekly(late)
+        assert again["status"] == "skipped", again
+        assert again["notes"] == ["weekly slot already ok"] and "decision" not in again
+    assert len(_events(eng)) == n_events + 3  # nothing trained twice
+    with eng.connect() as conn:
+        rows = conn.execute(
+            text("SELECT status, count(*) FROM pipeline_runs WHERE job = 'retrain'"
+                 " AND logical_time = :t GROUP BY status"), {"t": sunday.replace(second=0)},
+        ).all()  # fmt: skip
+        trig = conn.execute(
+            text("SELECT triggered_by FROM model_registry_events ORDER BY event_id DESC LIMIT 1")
+        ).scalar_one()
+    assert dict(rows) == {"ok": 1, "skipped": 2}
+    assert trig == "weekly"
+    nxt = weekly(sunday + timedelta(days=7))  # next week's slot trains again
+    assert nxt["status"] == "ok" and nxt["logical_time"] == "2024-04-14T03:00:00+00:00"
