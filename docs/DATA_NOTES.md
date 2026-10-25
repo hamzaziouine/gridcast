@@ -1485,3 +1485,23 @@ CI's `fresh-clone` job on the C15 commit (`2a8d7f7`, ubuntu, empty uv cache): cl
   fails); `test_retrain_db.py::test_prev_champion_rows_follow_a_gated_promotion_for_7_days`;
   keepalive `gate_stale`.
 - `pg_database_size` on Neon after this session's work: **75,595,776 B (75.6 MB)**.
+
+### 20.5 Open: the Cloudflare dispatch stopped (2026-10-25 06:3xZ) and did not come back
+
+- After the Worker restore (`7d7ff48`, pushed 08:10:28Z) the 08:22 slot (inside the ≤ 15 min
+  propagation window) and the **09:02 slot (52 min later) dispatched nothing either**. So the
+  stop is not explained by the 4-trigger code alone: something on the Cloudflare side changed
+  around the first redeploy (06:3xZ) and persists (candidates: the deploy failed and the triggers
+  were dropped; the `GH_DISPATCH_TOKEN` secret or the PAT behind it is gone, expired or
+  revoked; an account-level trigger problem). `/health` keeps answering, so the fetch handler
+  runs.
+- GitHub's own `schedule:` started no hourly run between 04:47Z and 09:05Z although every
+  workflow is `active`. Issue hours 07:00Z, 08:00Z and 09:00Z were dispatched by hand (runs
+  40171966968, 40175308604, 40179245472).
+- **Owner, now:** Cloudflare dashboard → Workers & Pages → gridcast → (1) Deployments/Builds: did
+  the builds since 06:29Z succeed? (2) Settings → Triggers: are `2,22 * * * *` and
+  `20 13,18 * * *` listed? (3) Settings → Variables and Secrets: is `GH_DISPATCH_TOKEN` present?
+  Then GitHub → Settings → Developer settings → fine-grained tokens: is that PAT active? (4)
+  Workers Logs (observability is on): the `scheduled` events print one JSON line per trigger,
+  e.g. `{"status":"http-401"}` or `"no-token"`. Until this is fixed the hourly loop runs only
+  on GitHub cron, which is dropping most slots.
