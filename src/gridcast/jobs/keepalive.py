@@ -10,6 +10,8 @@ the second line, run right after it:
 - `daily_stale`: no `ok` daily run finished in the last 48 h.
 - `loop_stale` (plan §6.7 step 3, armed only once the loop has run at least once, i.e. a
   `retrain` pipeline run exists): no registry event of the loop kinds in the last 8 days.
+- `gate_stale` (plan §6.7 step 3, armed once a `gate` pipeline run exists; dry runs write none):
+  no `ok` gate run in the last 48 h.
 
 Plan §6.7 step 2 (status-branch commit < 48 h) is not built: there is no status branch; the
 public record is the R2 bucket (ADR-0011), whose freshness `hourly_stale` covers.
@@ -32,6 +34,7 @@ JOB = "keepalive"
 HOURLY_MAX_AGE = timedelta(hours=6)
 DAILY_MAX_AGE = timedelta(hours=48)
 LOOP_MAX_AGE = timedelta(days=8)
+GATE_MAX_AGE = timedelta(hours=48)  # plan §6.7 step 3
 LOOP_EVENTS = (
     "trained",
     "backtested",
@@ -72,6 +75,13 @@ def checks(engine: Engine, now: datetime) -> list[str]:
         newest_event is None or now - newest_event.astimezone(UTC) > LOOP_MAX_AGE
     ):
         failed.append("loop_stale")
+    with engine.connect() as conn:  # armed once gate.yml has applied at least once
+        gate_armed = conn.execute(
+            text("SELECT 1 FROM pipeline_runs WHERE job = 'gate' LIMIT 1")
+        ).first()
+    gate = _newest_ok(engine, "gate")
+    if gate_armed is not None and (gate is None or now - gate > GATE_MAX_AGE):
+        failed.append("gate_stale")
     return failed
 
 

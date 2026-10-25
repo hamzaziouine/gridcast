@@ -27,6 +27,43 @@ drift_app = typer.Typer(help="Drift diagnostics.", no_args_is_help=True)
 app.add_typer(drift_app, name="drift")
 status_app = typer.Typer(help="Status-branch files (chart, metrics).", no_args_is_help=True)
 app.add_typer(status_app, name="status")
+gate_app = typer.Typer(help="Promotion gate: shadow -> champion, rollback.", no_args_is_help=True)
+app.add_typer(gate_app, name="gate")
+
+
+def _gate(action: str, apply: bool, run_kind: str, reason: str = "manual rollback") -> None:
+    import json
+
+    from gridcast.jobs import gate
+    from gridcast.storage import objstore
+
+    engine = _jobs_engine()
+    try:
+        out = gate.run(engine, objstore.private_store(), action, apply, reason, run_kind=run_kind)
+    finally:
+        engine.dispose()
+    typer.echo(json.dumps(out, indent=1, default=str))
+    if out["status"] == "failed":
+        raise typer.Exit(code=1)
+
+
+@gate_app.command("evaluate")
+def gate_evaluate(
+    apply: bool = typer.Option(False, "--apply", help="Write pointers/events. Default: dry run."),
+    run_kind: str = typer.Option("manual", help="scheduled | manual"),
+) -> None:
+    """§4.7 steps 2-8: rollback check, shadow promote/hold/reject, queue hand-over."""
+    _gate("evaluate", apply, run_kind)
+
+
+@gate_app.command("rollback")
+def gate_rollback(
+    apply: bool = typer.Option(False, "--apply", help="Repoint champion.json. Default: dry run."),
+    reason: str = typer.Option("manual rollback", help="Recorded in the registry event."),
+) -> None:
+    """Repoint champion.json to champion.prev.json; event rolled_back; 7-day cooldown."""
+    _gate("rollback", apply, "manual", reason)
+
 
 ISSUE_TIME_FORMATS = ["%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]
 

@@ -1,0 +1,77 @@
+name: gate
+
+# C19 (BUILD_PLAN §4.7 steps 2-8, §6.4; ADR-0016): every day, the rollback check (a champion
+# promoted < 7 days ago vs prev_champion over the same 3 days), then the shadow decision
+# (>= 14 days and >= 300 target hours; promote / wait / reject) and the queue hand-over. The
+# schedule applies its decision. A manual run is a DRY RUN unless `apply` is ticked; `rollback`
+# repoints champion.json to champion.prev.json by hand. Shares the `model-registry` concurrency
+# group with retrain.yml, so a gate never reads a half-written candidate. GitHub cron only: a
+# dropped slot delays a decision by one day (Healthchecks 1 d / 1 d, DATA_NOTES §20.3).
+on:
+  schedule:
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "evaluate (rollback check + shadow decision) or rollback (by hand)"
+        required: false
+        default: evaluate
+        type: choice
+        options: [evaluate, rollback]
+      apply:
+        description: "Write pointers and registry events (default: dry run, prints the decision)."
+        required: false
+        default: false
+        type: boolean
+      reason:
+        description: "Rollback only: recorded in the rolled_back event."
+        required: false
+        default: "manual rollback"
+
+permissions: {}
+
+concurrency:
+  group: model-registry
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      OBJSTORE_ENDPOINT_URL: ${{ secrets.OBJSTORE_ENDPOINT_URL }}
+      OBJSTORE_REGION: ${{ secrets.OBJSTORE_REGION }}
+      OBJSTORE_ACCESS_KEY_ID: ${{ secrets.OBJSTORE_ACCESS_KEY_ID }}
+      OBJSTORE_SECRET_ACCESS_KEY: ${{ secrets.OBJSTORE_SECRET_ACCESS_KEY }}
+      OBJSTORE_BUCKET_PRIVATE: ${{ secrets.OBJSTORE_BUCKET_PRIVATE }}
+      # Optional: unset = no heartbeat.
+      HEALTHCHECKS_GATE_URL: ${{ secrets.HEALTHCHECKS_GATE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.11 and runtime dependencies
+        run: |
+          uv python install 3.11
+          uv sync --locked --no-dev
+
+      - name: gridcast gate
+        env:
+          ACTION: ${{ inputs.action || 'evaluate' }}
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          RUN_KIND: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
+          REASON: ${{ inputs.reason || 'manual rollback' }}
+        run: |
+          args=()
+          if [ "$APPLY" = "true" ]; then args+=(--apply); fi
+          if [ "$ACTION" = "rollback" ]; then
+            uv run --no-sync gridcast gate rollback "${args[@]}" --reason "$REASON"
+          else
+            uv run --no-sync gridcast gate evaluate "${args[@]}" --run-kind "$RUN_KIND"
+          fi

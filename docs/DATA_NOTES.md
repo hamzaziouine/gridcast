@@ -1436,3 +1436,39 @@ queue, and hourly runs last 34 s median / 74 s max, so pings land at ~:03:30 and
 Secret renames for consistency with the `HEALTHCHECKS_*` names chosen on Day 4: `HC_PRUNE_URL` →
 `HEALTHCHECKS_PRUNE_URL`, `HC_GATE_URL` → `HEALTHCHECKS_GATE_URL` (`.env.example`); all optional,
 unset = no heartbeat.
+
+CI's `fresh-clone` job on the C15 commit (`2a8d7f7`, ubuntu, empty uv cache): clone 0 s, `uv sync`
+3 s, 217 tests in 109 s, **116 s total**.
+
+### 20.4 C19 `gate.yml`: shadow promotion, wait, rejection, rollback (ADR-0016)
+
+- `gridcast gate evaluate | rollback`; dry run by default (no pointer, event, `pipeline_runs` row
+  or heartbeat), `--apply` writes. gate.yml: daily `30 6 * * *` applies; a manual dispatch is a
+  dry run unless `apply` is ticked. `model-registry` concurrency group with retrain.
+- Rules exactly as plan §4.7 items 2-8 (table in ADR-0016). Deviations: rollback lives in the gate
+  (not the daily job); only Ontario holidays excuse a rollback gap (no ICI flag exists); the
+  shadow's coverage is measured on the intervals it served (backtest × 1.15), the champion's on
+  its live-recalibrated ones; the 7-day cooldown is read from the `rolled_back` event's
+  `cooldown_until`; exact-boundary values pass.
+- The hourly job now writes `prev_champion` rows for 7 days after a gated promotion
+  (`champion.json` with `promoted_at` and `previous_version`, pointer `models/champion.prev.json`).
+  The bootstrap champion has no `previous_version`, so nothing changes until the first promotion;
+  each hourly run makes one extra HEAD request on R2 for the prev pointer.
+- `ObjectStore.delete` (DeleteObject) for `shadow.json` / `queued.json` / `champion.prev.json`.
+  Permission checked on R2 with the jobs key, 2026-10-25 ~07:00Z: put
+  `gate/_delete_probe.json` → exists → delete → gone → delete again (no error).
+- keepalive: `gate_stale` (no `ok` gate run in 48 h), armed by the first applied gate run.
+- **Live dry runs (local, read-only), 2026-10-25 07:08Z:** `gate evaluate` → pointers champion
+  `lgbm-2026.10.23-49ca`, shadow / prev_champion / queued none, cooldown none →
+  `hold: no shadow running`. `gate rollback` → refused: `no models/champion.prev.json: nothing to
+  roll back to`. No `pipeline_runs` row with `job='gate'` exists afterwards (dry runs write
+  none). Nothing was promoted or rolled back.
+- Tests: `tests/unit/test_gate_rules.py` (25 table cases: promote, hold for age / targets / peak
+  sample / cooldown, reject for MAPE / peak / coverage / blocked version, drift_early for refits
+  only, rollback rule incl. the holiday excuse, identical-pair statistics, prev_champion window);
+  `tests/integration/test_gate_db.py` (life cycle on Postgres + moto: hold → dry run writes
+  nothing → promote + queue hand-over → automatic rollback after 4 days at 5 % vs 2 % → cooldown
+  hold → blocked version rejected; MAPE reject; manual rollback; rollback with nothing to restore
+  fails); `test_retrain_db.py::test_prev_champion_rows_follow_a_gated_promotion_for_7_days`;
+  keepalive `gate_stale`.
+- `pg_database_size` on Neon after this session's work: **75,595,776 B (75.6 MB)**.
