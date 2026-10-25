@@ -69,10 +69,14 @@ def test_stale_jobs_fail_and_the_loop_check_arms_after_the_first_retrain(
             {"t": NOW - timedelta(days=2)},
         )
     assert keepalive.checks(engine, NOW) == []
+    _ok(engine, "gate", NOW - timedelta(hours=49))  # the first gate run arms gate_stale
+    assert keepalive.checks(engine, NOW) == ["gate_stale"]
+    _ok(engine, "gate", NOW - timedelta(hours=23))
+    assert keepalive.checks(engine, NOW) == []
     pings: list[str] = []
     monkeypatch.setenv("HEALTHCHECKS_KEEPALIVE_URL", "https://hc.example/ping/k")
     # three days later nothing new has run: hourly and daily are stale
     assert keepalive.run(engine, now=lambda: NOW + timedelta(days=3), ping=pings.append)[
         "failed_checks"
-    ] == ["hourly_stale", "daily_stale"]
+    ] == ["hourly_stale", "daily_stale", "gate_stale"]
     assert pings == ["https://hc.example/ping/k/fail"]

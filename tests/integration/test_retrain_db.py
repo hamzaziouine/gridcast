@@ -145,6 +145,23 @@ def test_shadow_rows_are_written_from_its_start_only(env: Any) -> None:
     assert broken["shadow_error"] == "NoSuchKey"
 
 
+def test_prev_champion_rows_follow_a_gated_promotion_for_7_days(env: Any) -> None:
+    eng, store, _ = env
+    champion = store.get_json(predict.CHAMPION_KEY)
+    try:
+        store.put_json(predict.PREV_KEY, champion)  # the gate saved the old pointer
+        promoted = {"promoted_at": "2024-03-12T06:31:00+00:00", "previous_version": "lgbm-old"}
+        store.put_json(predict.CHAMPION_KEY, {**champion, **promoted})
+        during = predict.run(eng, store, datetime(2024, 3, 13, 12, tzinfo=UTC))
+        assert during["rows_written"]["prev_champion"] == 24 and during["prev_error"] is None
+        assert during["rows_written"]["champion"] == 24
+        after = predict.run(eng, store, datetime(2024, 3, 20, 12, tzinfo=UTC))  # > 7 days
+        assert "prev_champion" not in after["rows_written"]
+    finally:
+        store.put_json(predict.CHAMPION_KEY, champion)
+        store.delete(predict.PREV_KEY)
+
+
 def test_drift_trigger_needs_3_days_7_live_days_and_respects_the_cooldown(env: Any) -> None:
     eng = env[0]
 

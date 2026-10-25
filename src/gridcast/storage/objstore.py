@@ -1,6 +1,7 @@
 """Provider-neutral object store over the S3 API (R2 / B2 / MinIO), BUILD_PLAN §4.1 and §13 #28.
 
-Only four S3 calls are used (GetObject, PutObject, HeadObject, ListObjectsV2), path-style
+Five S3 calls are used (GetObject, PutObject, HeadObject, ListObjectsV2, and DeleteObject for the
+gate's pointer files only; the plan listed four), path-style
 addressing, region from OBJSTORE_REGION (`auto` on R2). Switching provider is a change of the
 OBJSTORE_* secrets, never of code. Credentials are read from the environment / `.env` and are never
 logged.
@@ -72,6 +73,11 @@ class ObjectStore:
             if not page.get("IsTruncated"):
                 return
             token = page.get("NextContinuationToken")
+
+    def delete(self, key: str) -> None:
+        """DeleteObject (the gate retires `shadow.json` / `queued.json`, ADR-0016); a missing key
+        is not an error (S3 semantics)."""
+        self.client.delete_object(Bucket=self.bucket, Key=key)
 
     def put_json(self, key: str, doc: Any) -> None:
         body = json.dumps(doc, indent=1, sort_keys=True, default=str).encode("utf-8")

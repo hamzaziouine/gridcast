@@ -4,6 +4,9 @@
 - Shadow (C18/C19): when `models/shadow.json` exists, the same features are scored by the shadow
   candidate and written as `model_name='shadow'` (insert-only, like the champion). A shadow
   failure never blocks the champion rows: it is reported in `shadow_error`.
+- prev_champion (C19): for 7 days after a gated promotion (`champion.json` has `promoted_at`
+  and `previous_version`), `models/champion.prev.json` is scored as `model_name='prev_champion'`
+  so the gate can compare both on the same window; same isolation as the shadow (`prev_error`).
 - live_features: the horizon-1 PSI features and the L0 lag of the champion's feature frame, one
   row per issue hour, insert-only (drift diagnostics, DATA_NOTES §19.3); a failure is reported in
   `live_features_error` and never blocks the forecast.
@@ -24,7 +27,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -50,6 +53,8 @@ from gridcast.timeutil import floor_hour, to_utc
 
 CHAMPION_KEY = "models/champion.json"
 SHADOW_KEY = "models/shadow.json"
+PREV_KEY = "models/champion.prev.json"  # written by the gate on a promotion (jobs/gate.py)
+PREV_SCORING = timedelta(days=7)  # §4.7 item 8: the old champion is scored 7 days after
 BASELINE_WINDOW = timedelta(days=60)
 INSERT_ONLY = {"champion", "shadow", "prev_champion"}
 _MODEL_CACHE: dict[tuple[str, str], tuple[LgbmForecaster, IntervalOffsets]] = {}
@@ -167,6 +172,16 @@ def champion_rows(
     return out, champ
 
 
+def _prev_active(champ: dict[str, Any], issue: datetime) -> bool:
+    """prev_champion rows are due for issue hours within 7 days after the promotion."""
+    promoted = champ.get("promoted_at")
+    if not promoted or not champ.get("previous_version"):
+        return False
+    t = datetime.fromisoformat(str(promoted))
+    t = t if t.tzinfo else t.replace(tzinfo=UTC)
+    return floor_hour(t) <= issue < t + PREV_SCORING
+
+
 def write_live_features(engine: Engine, frame: pd.DataFrame) -> None:
     from gridcast.drift.psi import LIVE_COLUMNS
 
@@ -271,6 +286,7 @@ def run(
     champ: dict[str, Any] | None = None
     max_avail = None
     shadow_error: str | None = None
+    prev_error: str | None = None
     live_features_error: str | None = None
     if wx is not None:
         frame = FeatureBuilder(history, wx).frame([issue])  # assert_asof inside
@@ -286,6 +302,13 @@ def run(
                 parts.append(champion_rows(store, frame, history, issue, SHADOW_KEY, "shadow")[0])
         except Exception as exc:  # the shadow must never cost the champion its rows
             shadow_error = type(exc).__name__
+        try:
+            if store.exists(PREV_KEY) and _prev_active(champ, issue):
+                parts.append(
+                    champion_rows(store, frame, history, issue, PREV_KEY, "prev_champion")[0]
+                )
+        except Exception as exc:  # nor the previous champion
+            prev_error = type(exc).__name__
         try:
             write_live_features(engine, frame)
         except Exception as exc:  # a drift diagnostic must never cost the forecast
@@ -309,5 +332,6 @@ def run(
         "rows_written": written,
         "max_input_available_at": max_avail,
         "shadow_error": shadow_error,
+        "prev_error": prev_error,
         "live_features_error": live_features_error,
     }
