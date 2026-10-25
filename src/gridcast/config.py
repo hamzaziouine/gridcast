@@ -1,6 +1,8 @@
 """All environment-driven settings and model-wide constants in one place."""
 
+import tomllib
 from datetime import timedelta
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -33,3 +35,13 @@ class Settings(BaseSettings):
 
 def get_settings() -> Settings:
     return Settings()
+
+
+URLS_FILE = Path(__file__).resolve().parents[2] / "config" / "urls.toml"
+
+
+def public_urls(path: Path = URLS_FILE) -> dict[str, str]:
+    """`[public]` of config/urls.toml (the one place for public URLs); empty values dropped."""
+    with path.open("rb") as fh:
+        table = tomllib.load(fh)["public"]
+    return {str(k): str(v) for k, v in table.items() if v}

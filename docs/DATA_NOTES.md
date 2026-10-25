@@ -1360,3 +1360,27 @@ the repo.
   start ends `skipped` in a few seconds (integration test
   `test_weekly_runs_train_once_per_slot_whoever_starts_them`: Cloudflare start → `ok` +
   3 events; GitHub start 3 h later and a Monday start → `skipped`, 0 events; next Sunday → `ok`).
+- Observed latency since the Worker took over (2026-10-24 21:30Z → 2026-10-25 06:30Z, 21 hourly
+  runs): Cloudflare-dispatched runs are created at **:02:46 / :22:46** (46 s after the slot),
+  start with no queueing, and take **34 s median, 74 s max**. GitHub's own `schedule:` started 3
+  of ~25 slots in that window (:09, :17, :47 past the hour). Healthchecks settings derived from
+  this: §20.3.
+
+### 20.2 C15 status branch, `chart_7d.svg`, `config/urls.toml`, fresh clone (ADR-0015)
+
+- `gridcast status build` (daily.yml, after the daily run, both slots) writes `chart_7d.svg`,
+  `metrics.json`, a copy of `latest/{forecast,meta,scoreboard}.json` and a README; the `status`
+  job (`contents: write`, no other secret) force-pushes them as a one-commit orphan branch.
+  Deviation from plan §6.2 step 6: the build and the push are two jobs, so the write token never
+  shares a job with the database URL; no `api/v1/*` names (ADR-0011 keys).
+- Chart rule: every series at horizon 24 (issued 24 h before the hour), window
+  [floor(now) − 7 d, newest champion issue + 24 h], best baseline = lowest MAPE of
+  seasonal_naive_168/24/persistence on the scored hours (seasonal_naive_168 when none). First
+  local build on live data (2026-10-25 06:32Z): 7,825 B SVG, 0 scored day-ahead hours (the
+  first champion day-ahead target is 2026-10-25 01:00Z; its actual lands with the 10-26 07:30 EST
+  PUB_Demand file), so the chart shows 7 days of actuals and the first ~29 h of forecasts.
+- Fresh clone (`scripts/fresh_clone_check.sh`, empty `UV_CACHE_DIR` and
+  `UV_PYTHON_INSTALL_DIR`, no `.env`, Windows 11 laptop, 2026-10-25 ~06:35Z, commit `a58f7f9`):
+  clone 2 s → `uv sync --locked` done at 172 s → `gridcast version` → `pytest` 209 passed in
+  239 s → **419 s total** (limit 900 s). CI runs the same script on every push to `main`
+  (`fresh-clone` job, ubuntu, setup-uv cache off).

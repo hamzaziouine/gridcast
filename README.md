@@ -1,5 +1,11 @@
 # GridCast
 
+[![GridCast day-ahead forecast vs actual, last 7 days](https://raw.githubusercontent.com/hamzaziouine/gridcast/status/chart_7d.svg)](https://github.com/hamzaziouine/gridcast/tree/status)
+
+<sub>Rebuilt by the daily job at 13:20Z and 18:20Z from the live tables
+([ADR-0015](docs/adr/0015-status-branch-and-chart.md)). Every line is the forecast issued 24 h
+before the hour; hours in the shaded area have no final actual yet.</sub>
+
 Every hour GridCast forecasts Ontario's electricity demand (IESO **Ontario Demand**, MW) for the
 next 24 hours, with an 80 % interval. The model is LightGBM, built from scratch. Each forecast is
 scored the next day against the final IESO actuals, next to IESO's own forecast and three naive
@@ -11,9 +17,10 @@ Cloudflare R2 and DagsHub MLflow.
 | | |
 |---|---|
 | Public API | <https://gridcast.hamzaziouine-23.workers.dev>: [`/v1/forecast/latest`](https://gridcast.hamzaziouine-23.workers.dev/v1/forecast/latest), [`/v1/scoreboard`](https://gridcast.hamzaziouine-23.workers.dev/v1/scoreboard), [`/health`](https://gridcast.hamzaziouine-23.workers.dev/health) (Cloudflare Worker in [`infra/worker/`](infra/worker/), deployed by Workers Builds on every push to `main`) |
-| Hourly forecasts | Since 2026-10-24 ([`hourly.yml`](.github/workflows/hourly.yml), cron `:02/:12/:22`). |
+| Hourly forecasts | Since 2026-10-24 ([`hourly.yml`](.github/workflows/hourly.yml), `:02/:22` from a Cloudflare cron, GitHub cron `:02/:12/:22` as fallback). |
 | Daily scoring | First run 2026-10-24 ([`daily.yml`](.github/workflows/daily.yml), 13:20Z and 18:20Z). |
-| Weekly retrain + backtest gate | [`retrain.yml`](.github/workflows/retrain.yml), Sunday 03:00Z. The first run (2026-10-24) took 13 min and its candidate was rejected (see below). |
+| Weekly retrain + backtest gate | [`retrain.yml`](.github/workflows/retrain.yml), Sunday 03:00Z, at most once per week whichever scheduler starts it ([ADR-0014](docs/adr/0014-cloudflare-cron-dispatches-github-jobs.md)). The first run (2026-10-24) took 13 min and its candidate was rejected (see below). |
+| Status branch | [`status`](https://github.com/hamzaziouine/gridcast/tree/status): the chart above, `metrics.json` and a copy of the published JSON. |
 | Experiment tracking | [DagsHub MLflow](https://dagshub.com/hamzaziouine/gridcast.mlflow) |
 
 All three endpoints are read from JSON files that the jobs publish to R2
@@ -93,10 +100,17 @@ Open-Meteo ──────────┼─> hourly.yml / daily.yml ┤
 Requires [uv](https://docs.astral.sh/uv/) and Python 3.11 (`uv python install 3.11`).
 
 ```bash
+git clone https://github.com/hamzaziouine/gridcast.git && cd gridcast
 uv sync
 uv run gridcast --help
 uv run ruff check && uv run mypy src && uv run pytest   # integration tests use an embedded Postgres
 ```
+
+No account or secret is needed for this: tests never touch Neon, R2, DagsHub or GitHub.
+[`scripts/fresh_clone_check.sh`](scripts/fresh_clone_check.sh) runs exactly these steps with
+empty caches and fails above 15 minutes; CI runs it on every push to `main`.
+
+Public URLs live in one file, [`config/urls.toml`](config/urls.toml).
 
 The jobs (`gridcast run hourly|daily|retrain|keepalive`) need the variables listed in
 [`.env.example`](.env.example).

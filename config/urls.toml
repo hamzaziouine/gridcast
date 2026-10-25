@@ -1,0 +1,12 @@
+# Public URLs of GridCast: the single source (BUILD_PLAN §4.8.8). The status chart footer and
+# metrics.json read it through gridcast.config.public_urls(); tests/unit/test_urls.py checks that
+# README.md and the Worker use the same values. Change a URL here first, then fix what the test names.
+# Empty = not live yet.
+
+[public]
+api = "https://gridcast.hamzaziouine-23.workers.dev"
+repo = "https://github.com/hamzaziouine/gridcast"
+status_branch = "https://github.com/hamzaziouine/gridcast/tree/status"
+status_chart = "https://raw.githubusercontent.com/hamzaziouine/gridcast/status/chart_7d.svg"
+mlflow = "https://dagshub.com/hamzaziouine/gridcast.mlflow"
+demo_site = "" # Phase D (Cloudflare Pages)

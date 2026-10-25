@@ -14,3 +14,5 @@ data/cache/
 .superpowers/
 .neon
 .env.local
+# gridcast status build output (pushed to the status branch by daily.yml, never to main)
+status_out/
