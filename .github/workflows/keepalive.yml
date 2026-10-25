@@ -9,6 +9,11 @@ on:
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
+    inputs:
+      scheduler:
+        description: "Set by the Cloudflare Worker cron (ADR-0014): 'cloudflare' = a scheduled run."
+        required: false
+        default: ""
 
 permissions: {}
 
@@ -53,7 +58,7 @@ jobs:
 
       - name: gridcast run keepalive
         env:
-          RUN_KIND: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
+          RUN_KIND: ${{ (github.event_name == 'schedule' || inputs.scheduler == 'cloudflare') && 'scheduled' || 'manual' }}
         run: uv run --no-sync gridcast run keepalive --run-kind "$RUN_KIND"
 
       - name: Heartbeat /fail when the enable step failed

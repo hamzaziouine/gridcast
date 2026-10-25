@@ -1337,3 +1337,26 @@ the DagsHub id, with the old one kept in `metrics.mlflow_local_run_id`. `models/
 `mlflow_run_id` was changed the same way, and no other field. A second run changes nothing.
 Logged as an `INTERVENTION`-class data repair (plan §12), done once by hand from a script in
 the repo.
+
+---
+
+## 20. Day 6 (2026-10-25): weekly jobs on Cloudflare cron, status branch, prune, gate
+
+### 20.1 Weekly jobs on the Cloudflare cron (ADR-0014 amendment)
+
+- Observed: the GitHub `schedule:` slot of `retrain.yml` for Sunday 2026-10-25 03:00Z had not
+  started by 06:12Z (no run in `gh run list`). Every hourly issue hour from 2026-10-24 22:00Z on
+  was carried by the Worker's dispatch; GitHub's own hourly slots ran twice in that window
+  (04:47Z and 00:17Z starts).
+- The Worker now has 4 cron triggers (`2,22 * * * *`, `20 13,18 * * *`, `0 3 * * SUN`,
+  `0 6 * * MON`), 4 of the free plan's 5.
+- **`run_kind` of Cloudflare-started runs.** Until this change a Worker dispatch arrived as a
+  plain `workflow_dispatch`, so hourly runs from ~2026-10-24 21:30Z to the deploy of this change
+  were recorded `run_kind='manual'` in `pipeline_runs` and `prediction_runs`. M4 (plan §2) counts
+  only `scheduled` runs, so those hours count as missed under the strict definition. They are not
+  rewritten (no hand edits of live tables, plan §12); the M4 report states the window. From this
+  change on the Worker sends `scheduler=cloudflare` and the workflows record `scheduled`.
+- Retrain duplicate safety: `reason=weekly` runs are keyed on the Sunday 03:00Z slot; a second
+  start ends `skipped` in a few seconds (integration test
+  `test_weekly_runs_train_once_per_slot_whoever_starts_them`: Cloudflare start → `ok` +
+  3 events; GitHub start 3 h later and a Monday start → `skipped`, 0 events; next Sunday → `ok`).

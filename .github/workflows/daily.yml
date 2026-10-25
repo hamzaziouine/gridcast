@@ -14,6 +14,10 @@ on:
     - cron: "20 18 * * *"
   workflow_dispatch:
     inputs:
+      scheduler:
+        description: "Set by the Cloudflare Worker cron (ADR-0014): 'cloudflare' = a scheduled run."
+        required: false
+        default: ""
       date:
         description: "EST date YYYY-MM-DD the run is for. Empty = today (EST)."
         required: false
@@ -58,7 +62,7 @@ jobs:
         id: daily
         env:
           RUN_DATE: ${{ inputs.date }}
-          RUN_KIND: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
+          RUN_KIND: ${{ (github.event_name == 'schedule' || inputs.scheduler == 'cloudflare') && 'scheduled' || 'manual' }}
         run: |
           args=(--run-kind "$RUN_KIND")
           if [ -n "$RUN_DATE" ]; then args+=(--date "$RUN_DATE"); fi

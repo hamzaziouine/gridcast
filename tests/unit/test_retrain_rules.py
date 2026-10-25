@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from gridcast.features.build import to_ns
-from gridcast.jobs.retrain import backtest_stage, champion_profile, slot_action
+from gridcast.jobs.retrain import backtest_stage, champion_profile, slot_action, weekly_slot
 from gridcast.models.lgbm import PROFILES, LgbmForecaster, keep_issue
 
 
@@ -43,6 +43,23 @@ def test_slot_action() -> None:
     assert slot_action({"kind": "refit"}, "refit") == "queue"  # never replaced before the gate
     assert slot_action({"kind": "challenger"}, "challenger") == "queue"
     assert slot_action({"kind": "challenger"}, "refit") == "queue"  # a refit never pre-empts
+
+
+@pytest.mark.parametrize(
+    ("now", "slot"),
+    [
+        ("2026-10-25T03:00:00", "2026-10-25T03:00:00"),  # the Sunday slot itself
+        ("2026-10-25T03:00:41", "2026-10-25T03:00:00"),  # Cloudflare, seconds late
+        ("2026-10-25T06:37:00", "2026-10-25T03:00:00"),  # GitHub cron, hours late
+        ("2026-10-26T01:15:00", "2026-10-25T03:00:00"),  # delayed past midnight into Monday
+        ("2026-10-25T02:59:59", "2026-10-18T03:00:00"),  # before the slot: last week's
+        ("2026-10-31T23:00:00", "2026-10-25T03:00:00"),  # Saturday
+        ("2026-11-01T03:00:00", "2026-11-01T03:00:00"),  # next Sunday
+    ],
+)
+def test_weekly_slot(now: str, slot: str) -> None:
+    t = datetime.fromisoformat(now).replace(tzinfo=UTC)
+    assert weekly_slot(t) == datetime.fromisoformat(slot).replace(tzinfo=UTC)
 
 
 def test_champion_profile_defaults_to_full_for_pre_adr13_pointers() -> None:

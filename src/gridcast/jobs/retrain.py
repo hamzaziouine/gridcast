@@ -24,6 +24,11 @@
 
 Nothing here touches `champion.json`: promotion happens only in the gate after ≥ 14 days of
 shadow (§4.7 step 2), never in a retrain.
+
+Weekly idempotency (ADR-0014): two schedulers start the weekly run (GitHub cron and the
+Cloudflare Worker). A `reason='weekly'` run is keyed on its weekly slot (`weekly_slot`: the latest
+Sunday 03:00 UTC at or before now) instead of the hour it started, and ends `skipped` before any
+work when that slot already has an `ok` retrain. Other reasons keep `floor_hour(now)`.
 """
 
 from __future__ import annotations
@@ -103,6 +108,18 @@ def slot_action(shadow: dict[str, Any] | None, kind: str) -> str:
     return "queue"
 
 
+WEEKLY_REASON = "weekly"
+WEEKLY_SLOT_HOUR = 3  # retrain.yml `0 3 * * 0` and the Worker's `0 3 * * SUN`
+
+
+def weekly_slot(now: datetime) -> datetime:
+    """The latest Sunday 03:00 UTC at or before `now`: the logical time of a weekly run, so a
+    late or duplicate start (even one delayed past midnight into Monday) maps to the same slot."""
+    t = floor_hour(now).replace(hour=WEEKLY_SLOT_HOUR)
+    t -= timedelta(days=(t.weekday() - 6) % 7)  # back to Sunday (weekday 6)
+    return t if t <= now else t - timedelta(days=7)
+
+
 def champion_profile(champion: dict[str, Any]) -> str:
     """Pointers written before ADR-0013 carry no profile: that champion was trained `full`."""
     return str(champion.get("profile") or "full")
@@ -134,11 +151,19 @@ def run(
         raise ValueError(f"unknown profile {profile!r}")
     now = deps.now()
     hc = get_settings().healthchecks_retrain_url
-    run_id = runs.start(engine, JOB, floor_hour(now), run_kind)
+    weekly = reason == WEEKLY_REASON
+    logical = weekly_slot(now) if weekly else floor_hour(now)
+    run_id = runs.start(engine, JOB, logical, run_kind)
     notes = runs.Notes()
     out: dict[str, Any] = {"reason": reason, "profile": profile, "run_kind": run_kind}
+    out["logical_time"] = logical.isoformat()
+    if weekly and runs.already_ok(engine, JOB, logical):
+        out["status"] = runs.finish(engine, run_id, "skipped", 0, ["weekly slot already ok"])
+        out["notes"] = ["weekly slot already ok"]
+        out["heartbeat"] = runs.heartbeat(hc, True, deps.ping)
+        return out
     try:
-        trigger = "drift" if reason.startswith("drift") else run_kind
+        trigger = "drift" if reason.startswith("drift") else ("weekly" if weekly else run_kind)
         out.update(_retrain(engine, store, deps, reason, profile, trigger, now, notes, log))
         status = "ok"
     except Exception as exc:
