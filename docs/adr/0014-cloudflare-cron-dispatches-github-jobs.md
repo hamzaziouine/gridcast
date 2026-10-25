@@ -1,6 +1,13 @@
 # ADR-0014: Cloudflare Cron Triggers dispatch the GitHub jobs
 
-- Status: **Accepted** (amended 2026-10-25: weekly jobs, `scheduler` input, retrain idempotency)
+- Status: **Accepted**. The 2026-10-25 amendment below is **suspended on the Worker side**: after
+  its deploy (commit `a58f7f9`) no Cloudflare dispatch arrived for the 07:02, 07:22 and 08:02
+  slots (the last one 50 min after the last push, so not trigger propagation), and the Worker
+  files were restored to the two-trigger version of `2a75998` at ~08:10Z. Cause not yet known
+  (no dashboard access from the build session; see DATA_NOTES §20.1). Still in force from the
+  amendment: the workflows' optional `scheduler` input and the retrain weekly-slot idempotency
+  (useful with GitHub cron and manual runs). Re-add the weekly triggers only after the owner
+  has read the Worker's deploy log and Triggers tab.
 - Date: 2026-10-24
 - Related: ADR-0001 (GitHub Actions cron), ADR-0012 (cron slots, per-hour success), ADR-0011
   (Worker), ADR-0013 (retrain); `infra/worker/src/index.js`, `infra/worker/wrangler.jsonc`,
