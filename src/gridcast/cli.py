@@ -25,6 +25,8 @@ run_app = typer.Typer(help="Scheduled jobs (what the GitHub workflows run).", no
 app.add_typer(run_app, name="run")
 drift_app = typer.Typer(help="Drift diagnostics.", no_args_is_help=True)
 app.add_typer(drift_app, name="drift")
+status_app = typer.Typer(help="Status-branch files (chart, metrics).", no_args_is_help=True)
+app.add_typer(status_app, name="status")
 
 ISSUE_TIME_FORMATS = ["%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]
 
@@ -394,6 +396,31 @@ def drift_reference(
     blob = psi.to_parquet(ref)
     store.put_bytes(psi.reference_key(version), blob, "application/vnd.apache.parquet")
     typer.echo(f"{psi.reference_key(version)}: {len(ref)} rows, {len(blob)} bytes")
+
+
+@status_app.command("build")
+def status_build(
+    out: Path = typer.Option(Path("status_out"), help="Directory to write the files into."),  # noqa: B008
+) -> None:
+    """chart_7d.svg + metrics.json + a mirror of latest/*.json, for the orphan `status` branch."""
+    import json
+
+    from gridcast.status import build
+    from gridcast.storage import objstore
+
+    configured = objstore.configured()
+    engine = _jobs_engine()
+    try:
+        res = build.build(
+            engine,
+            objstore.private_store() if configured else None,
+            objstore.public_store() if configured else None,
+            out,
+            datetime.now(UTC),
+        )
+    finally:
+        engine.dispose()
+    typer.echo(json.dumps(res, indent=1, default=str))
 
 
 @prune_app.command("adequacy")

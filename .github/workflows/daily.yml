@@ -7,7 +7,8 @@ name: daily
 # chance for a late file (the first slot ends `skipped`, not `ok`, while yesterday HE24 is
 # missing). A drift trigger (7-day MAPE > 1.5 x reference for 3 days, >= 7 live days, no retrain
 # in 72 h; ADR-0013) dispatches retrain.yml with reason drift:mape: the only reason this job has
-# `actions: write`. It never commits.
+# `actions: write`. The separate `status` job (ADR-0015) is the only one with `contents: write`: it
+# force-pushes generated files to the orphan `status` branch and never touches main.
 on:
   schedule:
     - cron: "20 13 * * *"
@@ -36,6 +37,8 @@ jobs:
     permissions:
       contents: read
       actions: write # gh workflow run retrain.yml on a drift trigger
+    outputs:
+      status_built: ${{ steps.status.outcome == 'success' }}
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       OBJSTORE_ENDPOINT_URL: ${{ secrets.OBJSTORE_ENDPOINT_URL }}
@@ -74,3 +77,49 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REASON: ${{ steps.daily.outputs.retrain_reason }}
         run: gh workflow run retrain.yml --repo "$GITHUB_REPOSITORY" --ref main -f reason="$REASON"
+
+      # C15 (ADR-0015): chart_7d.svg + metrics.json + a mirror of latest/*.json. Built here (this
+      # job has the read credentials), pushed by the `status` job (which has contents: write and
+      # no other secret). A failure here never changes the daily run's status or heartbeat.
+      - name: Status files
+        id: status
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: uv run --no-sync gridcast status build --out status_out
+
+      - name: Upload status files
+        if: ${{ !cancelled() && steps.status.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: status
+          path: status_out/
+          retention-days: 3
+          if-no-files-found: error
+
+  status:
+    needs: daily
+    if: ${{ !cancelled() && needs.daily.outputs.status_built == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # force-push the orphan `status` branch; nothing else is pushed
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: status
+          path: status_out
+
+      - name: Force-push the orphan status branch (one commit, generated files only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        working-directory: status_out
+        run: |
+          set -euo pipefail
+          git init -q -b status
+          git add -A
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "status: $(date -u +%Y-%m-%dT%H:%MZ) (daily run $GITHUB_RUN_ID)"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" HEAD:refs/heads/status
+          git log --oneline -1

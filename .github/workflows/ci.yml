@@ -74,3 +74,24 @@ jobs:
             fi
           done
           exit $missing
+
+  # C15: README "Run it locally" from a fresh clone with empty uv caches and no services
+  # (integration tests on the embedded Postgres) must be green in < 15 min.
+  fresh-clone:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/fresh_clone_check.sh
+          sparse-checkout-cone-mode: false
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+
+      - name: Fresh clone -> CLI + test suite (limit 900 s)
+        env:
+          REF: ${{ github.ref_name }}
+        run: bash scripts/fresh_clone_check.sh "https://github.com/$GITHUB_REPOSITORY.git" "$REF"
