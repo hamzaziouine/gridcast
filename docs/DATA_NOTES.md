@@ -1365,6 +1365,19 @@ the repo.
   start with no queueing, and take **34 s median, 74 s max**. GitHub's own `schedule:` started 3
   of ~25 slots in that window (:09, :17, :47 past the hour). Healthchecks settings derived from
   this: §20.3.
+- **Regression and rollback (2026-10-25).** After the Workers Builds deploy of `a58f7f9` (pushed
+  06:29Z: 4 triggers incl. `0 3 * * SUN` / `0 6 * * MON`, dispatch body with `inputs`), the Worker
+  dispatched nothing: no run for the 07:02, 07:22 or 08:02 slots (later pushes at 06:48, 06:57
+  and 07:12Z also redeployed it; 08:02 was 50 min after the last one, past the documented ≤ 15
+  min trigger propagation). GitHub's own `schedule:` started nothing in that window either. The
+  body itself is valid: replaying `{"ref":"main","inputs":{"scheduler":"cloudflare"}}` with `gh
+  api` at 07:13Z created run 40171966968 (`run_kind='scheduled'` in `pipeline_runs` and
+  `prediction_runs`; issue hour 07:00Z is therefore labelled scheduled although it was started
+  by hand). Issue hour 08:00Z was dispatched by hand as `manual` (run 40175308604). The Worker
+  files were restored to `2a75998` (2 triggers, body `{ref: main}`) at ~08:10Z; whether
+  dispatching resumes is in §20.5. **Owner check:** Cloudflare dashboard → Workers → gridcast →
+  Deployments (did the build after `a58f7f9` fail at the trigger step?) and Settings →
+  Triggers (which crons are live; the account's 5-trigger limit counts every Worker).
 
 ### 20.2 C15 status branch, `chart_7d.svg`, `config/urls.toml`, fresh clone (ADR-0015)
 

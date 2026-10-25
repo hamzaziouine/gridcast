@@ -1,9 +1,8 @@
 // node --test: the Worker's routes against a fake R2 binding (no network, no wrangler).
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import worker, { DISPATCH, dispatch } from "../src/index.js";
+import worker, { dispatch } from "../src/index.js";
 
 function bucket(objects) {
   return {
@@ -102,44 +101,8 @@ test("cron dispatch: no-op without token, POSTs workflow_dispatch on main with i
     "https://api.github.com/repos/hamzaziouine/gridcast/actions/workflows/daily.yml/dispatches",
   );
   assert.equal(calls[0].init.headers.authorization, "Bearer t");
-  assert.deepEqual(JSON.parse(calls[0].init.body), {
-    ref: "main",
-    inputs: { scheduler: "cloudflare" },
-  });
+  assert.deepEqual(JSON.parse(calls[0].init.body), { ref: "main" });
   const bad = await dispatch("2,22 * * * *", { GH_DISPATCH_TOKEN: "t" }, async () =>
     new Response(null, { status: 403 }));
   assert.equal(bad.status, "http-403");
-});
-
-test("weekly crons dispatch retrain.yml (weekly, fast) and keepalive.yml", async () => {
-  const calls = [];
-  const fake = async (url, init) => {
-    calls.push({ url, body: JSON.parse(init.body) });
-    return new Response(null, { status: 204 });
-  };
-  const env = { GH_DISPATCH_TOKEN: "t" };
-  assert.equal((await dispatch("0 3 * * SUN", env, fake)).workflow, "retrain.yml");
-  assert.equal((await dispatch("0 6 * * MON", env, fake)).workflow, "keepalive.yml");
-  assert.match(calls[0].url, /\/workflows\/retrain\.yml\/dispatches$/);
-  assert.deepEqual(calls[0].body, {
-    ref: "main",
-    inputs: { scheduler: "cloudflare", reason: "weekly", profile: "fast" },
-  });
-  assert.deepEqual(calls[1].body, { ref: "main", inputs: { scheduler: "cloudflare" } });
-});
-
-test("wrangler.jsonc crons equal the DISPATCH keys (<= 5 on the free plan)", () => {
-  const raw = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
-  const crons = JSON.parse(raw.replace(/^\s*\/\/.*$/gm, "")).triggers.crons;
-  assert.deepEqual([...crons].sort(), Object.keys(DISPATCH).sort());
-  assert.ok(crons.length <= 5);
-});
-
-test("every dispatched workflow declares the inputs the Worker sends", () => {
-  for (const { workflow, inputs } of Object.values(DISPATCH)) {
-    const yml = readFileSync(new URL(`../../../.github/workflows/${workflow}`, import.meta.url), "utf8");
-    for (const name of Object.keys(inputs)) {
-      assert.match(yml, new RegExp(`^      ${name}:`, "m"), `${workflow} lacks input ${name}`);
-    }
-  }
 });
