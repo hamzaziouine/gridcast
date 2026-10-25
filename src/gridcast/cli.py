@@ -374,6 +374,29 @@ def run_keepalive(
         raise typer.Exit(code=1)
 
 
+@run_app.command("prune")
+def run_prune(
+    apply: bool = typer.Option(False, "--apply", help="Delete. Default: dry run (counts only)."),
+    run_kind: str = typer.Option("manual", help="scheduled | manual"),
+) -> None:
+    """Retention (plan §6.8): weak names > 90 d with their scores, realtime versions > 60 d."""
+    import json
+
+    from gridcast.jobs import prune
+
+    def direct() -> Engine:
+        return db.make_engine(db.migration_url(), isolation_level="AUTOCOMMIT")
+
+    engine = _jobs_engine()
+    try:
+        out = prune.run(engine, direct, apply_changes=apply, run_kind=run_kind)
+    finally:
+        engine.dispose()
+    typer.echo(json.dumps(out, indent=1, default=str))
+    if out["status"] == "failed":
+        raise typer.Exit(code=1)
+
+
 @drift_app.command("reference")
 def drift_reference(
     version: str = typer.Option("", help="Model version; default: the current champion."),
