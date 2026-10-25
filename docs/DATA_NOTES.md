@@ -1384,3 +1384,55 @@ the repo.
   clone 2 s → `uv sync --locked` done at 172 s → `gridcast version` → `pytest` 209 passed in
   239 s → **419 s total** (limit 900 s). CI runs the same script on every push to `main`
   (`fresh-clone` job, ubuntu, setup-uv cache off).
+- First branch push: daily.yml `workflow_dispatch` run 40170455473 (2026-10-25 06:49Z, 34 s; the
+  daily slot itself ended `skipped`, yesterday HE24 not posted yet): jobs `daily` and `status`
+  both `success`, `refs/heads/status` = `8b1ca96`, `raw.githubusercontent.com/.../status/chart_7d.svg`
+  → 200 `image/svg+xml`, 7,840 B.
+
+### 20.3 C16 `prune.yml` and the Healthchecks settings
+
+**Retention as built** (`jobs/prune.py`, plan §4.4 levers 1 and 3, §6.8): (1) predictions of
+`seasonal_naive_24`, `persistence`, `prev_champion` with `issue_time` older than 90 days are
+deleted **with their `scores` rows and `prediction_runs` rows in one transaction**, scores first
+(§14.4: the 0004 layout has no FK from scores to predictions, so the prune must take the scores
+with it or `v_scores` would silently drop them while `scores` kept their bytes); `score_daily`
+keeps their aggregates because the daily job only rebuilds the trailing 45 days
+(`PRUNE_DAYS 90 > SCORE_DAYS 45`, tested). (2) `raw_demand_history` `realtime_totals` rows older
+than 60 days except the newest version per hour. (3) `VACUUM (ANALYZE)` of the touched tables
+over `DATABASE_URL_DIRECT`, only when something was deleted. Nothing else is ever deleted;
+champion, shadow, seasonal_naive_168 and ieso_adequacy rows are kept forever. Adequacy3
+retention stays in the hourly ingest (§14.1).
+
+**Dry run by default.** `gridcast run prune` counts only (`pipeline_runs` status `skipped`, note
+`dry-run`, no heartbeat); `--apply` deletes. `prune.yml`: monthly `0 5 1 * *` applies; a manual
+dispatch is a dry run unless `apply` is ticked. GitHub cron only: monthly and idempotent, so a
+dropped slot costs nothing that the next run or a manual dispatch does not recover.
+
+**Dry run on live Neon (2026-10-25 06:5xZ, local, read-only apart from its own `pipeline_runs`
+row):** cutoffs 2026-07-27 06:00Z (weak names) and 2026-08-26 06:00Z (realtime); rows that
+would be deleted: scores 0, predictions 0, prediction_runs 0, realtime versions 0 (live
+predictions start 2026-10-24; RealtimeTotals stores one complete version per hour). Sizes:
+`pg_database_size` 75,595,776 B (75.6 MB); `raw_demand_history` 26.7 MB, `weather_hourly`
+26.1 MB, `actuals` 12.0 MB, `ieso_forecast_snapshots` 0.86 MB, `predictions` 0.29 MB,
+`pipeline_runs` 0.09 MB. The first real deletion happens on the 2027-02-01 run (the 90-day mark
+of 2026-10-24 is 2027-01-22). Year-one projection unchanged from §14.4: ≈ 371 MB with the prune,
+≈ 410 MB if a shadow runs all year (§19.2), both under the 450 MB fail line and the 500 MB quota.
+
+**Healthchecks.io settings (owner sets these in the Healthchecks UI; "Simple" schedule).** Derived
+from §20.1: a Cloudflare dispatch creates the run ~46 s after its cron minute, it starts with no
+queue, and hourly runs last 34 s median / 74 s max, so pings land at ~:03:30 and ~:23:30. Every
+`skipped` run also pings success, and `/fail` pings alert at once whatever the grace.
+
+| check (secret) | period | grace | alerts when |
+|---|---|---|---|
+| hourly (`HEALTHCHECKS_HOURLY_URL`) | 1 h | 30 min | ~90 min without a ping: both Cloudflare slots of an hour and every GitHub fallback missed (was plan 1 h / 40 min) |
+| api (`HEALTHCHECKS_API_URL`, pinged by hourly's probe) | 1 h | 30 min | same cadence as hourly; a stale `/health` sends `/fail` at once |
+| daily (`HEALTHCHECKS_DAILY_URL`) | 1 day | 2 h | both daily slots of a day missed (pings ~13:22Z and ~18:22Z; was plan 1 d / 6 h) |
+| retrain (`HEALTHCHECKS_RETRAIN_URL`) | 7 days | 6 h | no weekly run by Sun ~09:15Z: run ≈ 13 min after 03:00:46Z, 6 h leaves room for the GitHub fallback (seen 2 h 37 min late) |
+| keepalive (`HEALTHCHECKS_KEEPALIVE_URL`) | 7 days | 6 h | no Monday run by ~12:00Z |
+| prune (`HEALTHCHECKS_PRUNE_URL`) | 31 days | 2 days | GitHub cron only; only scheduled/`--apply` runs ping, so a manual dry run never resets the timer |
+| gate (`HEALTHCHECKS_GATE_URL`, C19) | 1 day | 1 day | two daily gate slots in a row missed (GitHub cron only; a one-day slip only delays a decision) |
+
+Secret renames for consistency with the `HEALTHCHECKS_*` names chosen on Day 4: `HC_PRUNE_URL` →
+`HEALTHCHECKS_PRUNE_URL`, `HC_GATE_URL` → `HEALTHCHECKS_GATE_URL` (`.env.example`); all optional,
+unset = no heartbeat.

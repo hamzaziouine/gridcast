@@ -1,0 +1,57 @@
+name: prune
+
+# C16 (BUILD_PLAN §6.8, §4.4; DATA_NOTES §14.4, §20.3): keep Neon under 0.5 GB. Deletes only:
+# seasonal_naive_24 / persistence / prev_champion predictions older than 90 days together with
+# their scores and run rows (score_daily keeps their aggregates), and RealtimeTotals versions
+# older than 60 days except the newest per hour; then VACUUM (ANALYZE) over DATABASE_URL_DIRECT.
+# The monthly schedule applies; a manual run is a dry run unless `apply` is ticked. Monthly and
+# idempotent, so GitHub cron alone is enough (a dropped slot is caught by the 31 d Healthchecks
+# check and the next month's run).
+on:
+  schedule:
+    - cron: "0 5 1 * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Delete the rows (default: dry run, counts only)."
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
+      # Optional: unset = no heartbeat.
+      HEALTHCHECKS_PRUNE_URL: ${{ secrets.HEALTHCHECKS_PRUNE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.11 and runtime dependencies
+        run: |
+          uv python install 3.11
+          uv sync --locked --no-dev
+
+      - name: gridcast run prune
+        env:
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          RUN_KIND: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
+        run: |
+          args=(--run-kind "$RUN_KIND")
+          if [ "$APPLY" = "true" ]; then args+=(--apply); fi
+          uv run --no-sync gridcast run prune "${args[@]}"
