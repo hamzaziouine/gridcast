@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import worker, { dispatch } from "../src/index.js";
+import worker, { dispatch, runScheduled } from "../src/index.js";
 
 function bucket(objects) {
   return {
@@ -105,4 +105,43 @@ test("cron dispatch: no-op without token, POSTs workflow_dispatch on main with i
   const bad = await dispatch("2,22 * * * *", { GH_DISPATCH_TOKEN: "t" }, async () =>
     new Response(null, { status: 403 }));
   assert.equal(bad.status, "http-403");
+});
+
+test("scheduled run records its outcome in R2 and /health exposes it without error text", async () => {
+  const store = {};
+  const env = {
+    PUBLIC: {
+      ...bucket(store),
+      async put(key, body) {
+        store[key] = body;
+      },
+    },
+  };
+  const at = Date.parse("2026-11-01T16:02:00Z");
+  const r = await runScheduled({ cron: "2,22 * * * *", scheduledTime: at }, env);
+  assert.equal(r.status, "no-token");
+  assert.equal(JSON.parse(store["ops/dispatcher.json"]).status, "no-token");
+  let body = await (await call("/health", env)).json();
+  assert.deepEqual(body.dispatcher, {
+    status: "no-token",
+    workflow: "hourly.yml",
+    cron: "2,22 * * * *",
+    at: "2026-11-01T16:02:00.000Z",
+  });
+
+  const withToken = { ...env, GH_DISPATCH_TOKEN: "t" };
+  const ok = await runScheduled({ cron: "2,22 * * * *", scheduledTime: at }, withToken, async () =>
+    new Response(null, { status: 204 }));
+  assert.equal(ok.status, "dispatched");
+  const boom = await runScheduled({ cron: "2,22 * * * *", scheduledTime: at }, withToken, async () => {
+    throw new Error("network down");
+  });
+  assert.equal(boom.status, "error");
+  body = await (await call("/health", env)).json();
+  assert.equal(body.dispatcher.status, "error");
+  assert.equal(body.dispatcher.error, undefined);
+
+  // No binding: the outcome is still returned; a /health without the record says null.
+  assert.equal((await runScheduled({ cron: "2,22 * * * *", scheduledTime: at }, {})).status, "no-token");
+  assert.equal((await (await call("/health", { PUBLIC: bucket({}) })).json()).dispatcher, null);
 });
