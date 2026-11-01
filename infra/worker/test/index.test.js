@@ -101,7 +101,10 @@ test("cron dispatch: no-op without token, POSTs workflow_dispatch on main with i
     "https://api.github.com/repos/hamzaziouine/gridcast/actions/workflows/daily.yml/dispatches",
   );
   assert.equal(calls[0].init.headers.authorization, "Bearer t");
-  assert.deepEqual(JSON.parse(calls[0].init.body), { ref: "main" });
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    ref: "main",
+    inputs: { scheduler: "cloudflare" },
+  });
   const bad = await dispatch("2,22 * * * *", { GH_DISPATCH_TOKEN: "t" }, async () =>
     new Response(null, { status: 403 }));
   assert.equal(bad.status, "http-403");

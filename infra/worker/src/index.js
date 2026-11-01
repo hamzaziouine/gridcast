@@ -126,7 +126,8 @@ export async function dispatch(cron, env, fetchImpl = fetch) {
         "user-agent": "gridcast-worker",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ ref: "main" }),
+      // scheduler=cloudflare makes the run record run_kind 'scheduled' instead of 'manual'.
+      body: JSON.stringify({ ref: "main", inputs: { scheduler: "cloudflare" } }),
     },
   );
   return { cron, workflow, status: res.status === 204 ? "dispatched" : `http-${res.status}` };
