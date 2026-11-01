@@ -1,9 +1,11 @@
 // GridCast public API (Worker host, BUILD_PLAN §3.0 item 8).
 // Serves the JSON snapshots the hourly/daily jobs publish to the R2 bucket gridcast-public
-// (binding PUBLIC, read-only use). It never holds a database credential.
+// (binding PUBLIC). Its only write is ops/dispatcher.json, the outcome of the last cron dispatch.
+// It never holds a database credential.
 //
 //   GET /                    service index
-//   GET /health              liveness + staleness of the newest forecast (always 200)
+//   GET /health              liveness + staleness of the newest forecast + last cron dispatch
+//                            (always 200)
 //   GET /v1/forecast/latest  latest/forecast.json
 //   GET /v1/scoreboard       latest/scoreboard.json
 //
@@ -15,6 +17,7 @@ const KEYS = {
   "/v1/scoreboard": "latest/scoreboard.json",
 };
 const META_KEY = "latest/meta.json";
+const DISPATCH_KEY = "ops/dispatcher.json";
 const STALE_AFTER_MIN = 90;
 
 const BASE_HEADERS = {
@@ -59,9 +62,26 @@ async function snapshot(env, key) {
   return new Response(r.text, { status: 200, headers });
 }
 
+// The last cron outcome without its error text: status, workflow, cron, at (or null).
+async function dispatcherStatus(env) {
+  const r = await readObject(env, DISPATCH_KEY);
+  if (!r.text) return null;
+  try {
+    const d = JSON.parse(r.text);
+    return {
+      status: d.status ?? null,
+      workflow: d.workflow ?? null,
+      cron: d.cron ?? null,
+      at: d.at ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function health(env, now) {
   const r = await readObject(env, META_KEY);
-  const body = { service: "gridcast", status: "ok" };
+  const body = { service: "gridcast", status: "ok", dispatcher: await dispatcherStatus(env) };
   if (r.text) {
     try {
       const meta = JSON.parse(r.text);
@@ -112,9 +132,34 @@ export async function dispatch(cron, env, fetchImpl = fetch) {
   return { cron, workflow, status: res.status === 204 ? "dispatched" : `http-${res.status}` };
 }
 
+// Every cron outcome is logged and recorded in R2 so a dead dispatcher shows up in GET /health
+// (status no-token / http-401 / error, or an old `at`) instead of only in Workers Logs: on
+// 2026-10-25 it went silent for a week behind GitHub's sparse fallback runs (DATA_NOTES 20.5).
+export async function runScheduled(event, env, fetchImpl = fetch) {
+  let r;
+  try {
+    r = await dispatch(event.cron, env, fetchImpl);
+  } catch (err) {
+    r = { cron: event.cron, status: "error", error: String(err && err.message ? err.message : err) };
+  }
+  r.at = new Date(event.scheduledTime ?? Date.now()).toISOString();
+  console.log(JSON.stringify(r));
+  if (env.PUBLIC) {
+    try {
+      await env.PUBLIC.put(DISPATCH_KEY, JSON.stringify(r), {
+        httpMetadata: { contentType: "application/json" },
+      });
+    } catch (err) {
+      const error = String(err && err.message ? err.message : err);
+      console.log(JSON.stringify({ status: "record-failed", error }));
+    }
+  }
+  return r;
+}
+
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(dispatch(event.cron, env).then((r) => console.log(JSON.stringify(r))));
+    ctx.waitUntil(runScheduled(event, env));
   },
 
   async fetch(request, env) {
