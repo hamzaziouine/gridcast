@@ -1,0 +1,76 @@
+{
+ "schema_version": 1,
+ "generated_at": "2026-11-14T18:44:35Z",
+ "chart": {
+  "window_start": "2026-11-07T18:00:00Z",
+  "window_end": "2026-11-15T18:00:00Z",
+  "horizon_h": 24,
+  "best_baseline": "seasonal_naive_24",
+  "n_scored_hours": 156,
+  "mape_pct": {
+   "champion": 3.12,
+   "ieso_adequacy": 1.417,
+   "seasonal_naive_24": 4.546
+  },
+  "first_forecast_target": "2026-11-07T18:00:00Z",
+  "model_version": "lgbm-2026.10.23-49ca"
+ },
+ "champion": {
+  "model_name": "lgbm",
+  "model_version": "lgbm-2026.10.23-49ca",
+  "champion_status": "ok",
+  "bootstrap_reason": "bootstrap",
+  "promoted_at": "2026-10-24T01:18:02.190603+00:00",
+  "feature_schema_version": 1
+ },
+ "last_runs": {
+  "daily": {
+   "logical_time": "2026-11-14T05:00:00Z",
+   "status": "skipped",
+   "run_kind": "scheduled",
+   "finished_at": "2026-11-14T18:44:34Z"
+  },
+  "gate": {
+   "logical_time": "2026-11-14T13:00:00Z",
+   "status": "ok",
+   "run_kind": "scheduled",
+   "finished_at": "2026-11-14T13:43:33Z"
+  },
+  "hourly": {
+   "logical_time": "2026-11-14T18:00:00Z",
+   "status": "skipped",
+   "run_kind": "scheduled",
+   "finished_at": "2026-11-14T18:22:58Z"
+  },
+  "keepalive": {
+   "logical_time": "2026-11-09T15:00:00Z",
+   "status": "ok",
+   "run_kind": "scheduled",
+   "finished_at": "2026-11-09T15:57:09Z"
+  },
+  "prune": {
+   "logical_time": "2026-11-01T11:00:00Z",
+   "status": "ok",
+   "run_kind": "scheduled",
+   "finished_at": "2026-11-01T11:46:43Z"
+  },
+  "retrain": {
+   "logical_time": "2026-11-08T03:00:00Z",
+   "status": "ok",
+   "run_kind": "scheduled",
+   "finished_at": "2026-11-08T10:16:43Z"
+  }
+ },
+ "mirror_missing": [],
+ "urls": {
+  "api": "https://gridcast.hamzaziouine-23.workers.dev",
+  "repo": "https://github.com/hamzaziouine/gridcast",
+  "status_branch": "https://github.com/hamzaziouine/gridcast/tree/status",
+  "status_chart": "https://raw.githubusercontent.com/hamzaziouine/gridcast/status/chart_7d.svg",
+  "mlflow": "https://dagshub.com/hamzaziouine/gridcast.mlflow"
+ },
+ "attribution": [
+  "Demand data and the IESO forecast: Independent Electricity System Operator (IESO), used under the IESO Terms of Use",
+  "Weather: Open-Meteo.com, CC BY 4.0"
+ ]
+}
