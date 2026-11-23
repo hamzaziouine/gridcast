@@ -29,6 +29,8 @@ status_app = typer.Typer(help="Status-branch files (chart, metrics).", no_args_i
 app.add_typer(status_app, name="status")
 gate_app = typer.Typer(help="Promotion gate: shadow -> champion, rollback.", no_args_is_help=True)
 app.add_typer(gate_app, name="gate")
+repair_app = typer.Typer(help="Data repairs (run from repair.yml).", no_args_is_help=True)
+app.add_typer(repair_app, name="repair")
 
 
 def _gate(action: str, apply: bool, run_kind: str, reason: str = "manual rollback") -> None:
@@ -513,6 +515,30 @@ def prune_adequacy(
         finally:
             direct.dispose()
         typer.echo(f"vacuum full done; ieso_forecast_snapshots = {size} bytes")
+
+
+@repair_app.command("ieso-rows")
+def repair_ieso_rows(
+    start: datetime = typer.Option(..., formats=ISSUE_TIME_FORMATS, help="First issue hour."),  # noqa: B008
+    end: datetime = typer.Option(..., formats=ISSUE_TIME_FORMATS, help="Last issue hour."),  # noqa: B008
+    apply: bool = typer.Option(False, "--apply", help="Write. Default: dry run (counts only)."),
+) -> None:
+    """Recompute past ieso_adequacy rows as of each cutoff from the stored snapshots."""
+    import json
+
+    from gridcast.jobs import repair
+
+    engine = _jobs_engine()
+    try:
+        out = repair.ieso_rows(
+            engine,
+            start if start.tzinfo else start.replace(tzinfo=UTC),
+            end if end.tzinfo else end.replace(tzinfo=UTC),
+            apply=apply,
+        )
+    finally:
+        engine.dispose()
+    typer.echo(json.dumps(out, indent=1, default=str))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,66 @@
+name: repair
+
+# Data repairs (BUILD_PLAN §12): live tables are never edited by hand. A repair is a `gridcast
+# repair ...` command started here, so its inputs and output stay in the Actions log; its
+# docs/OPS_LOG.md entry is tagged INTERVENTION. Manual only, dry run unless `apply` is ticked.
+#
+# ieso-rows: rewrite past ieso_adequacy rows as of each issue's cutoff from the Adequacy3
+# snapshots now stored (DATA_NOTES §21.2). Champion rows are never touched.
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Repair to run."
+        required: true
+        default: ieso-rows
+        type: choice
+        options:
+          - ieso-rows
+      start:
+        description: "First issue hour, UTC (e.g. 2026-10-24T00:00:00)."
+        required: true
+      end:
+        description: "Last issue hour, UTC (e.g. 2026-11-22T23:00:00)."
+        required: true
+      apply:
+        description: "Write the rows (default: dry run, counts only)."
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.11 and runtime dependencies
+        run: |
+          uv python install 3.11
+          uv sync --locked --no-dev
+
+      - name: gridcast repair
+        env:
+          COMMAND: ${{ inputs.command }}
+          START: ${{ inputs.start }}
+          END: ${{ inputs.end }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          args=(--start "$START" --end "$END")
+          if [ "$APPLY" = "true" ]; then args+=(--apply); fi
+          uv run --no-sync gridcast repair "$COMMAND" "${args[@]}"
