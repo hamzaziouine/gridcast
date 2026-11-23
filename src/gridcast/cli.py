@@ -282,7 +282,9 @@ def run_hourly(
         help="Default: floor(now). No offset means UTC.",
     ),
     run_kind: str = typer.Option("scheduled", help="scheduled | catchup | manual"),
-    catchup_hours: int = typer.Option(6, help="Missed issue hours to back-fill honestly."),
+    catchup_hours: int | None = typer.Option(
+        None, help="Missed issue hours to back-fill honestly. Default: hourly.CATCHUP_HOURS (24)."
+    ),
     publish: bool = typer.Option(True, "--publish/--no-publish", help="Write latest/*.json."),
 ) -> None:
     """Ingest realtime + adequacy, snapshot weather, forecast (with catch-up), publish."""
@@ -308,7 +310,7 @@ def run_hourly(
             deps,
             issue_time=issue,
             run_kind=run_kind,
-            catchup_hours=catchup_hours,
+            catchup_hours=hourly.CATCHUP_HOURS if catchup_hours is None else catchup_hours,
         )
     finally:
         engine.dispose()

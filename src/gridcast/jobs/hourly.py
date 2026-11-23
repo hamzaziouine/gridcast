@@ -6,7 +6,7 @@ Steps, for `issue_time = floor(now)` (or `--issue-time`), `data_cutoff = issue_t
    bucket, retention prune; its own `pipeline_runs` row (job `ieso_adequacy`, logical_time = the
    run's minute). Runs before the dedupe check, so later cron slots pick up the ~:25 reissue.
 1. Dedupe: an `ok` row for (hourly, issue_time) -> this run is `skipped`, exit 0.
-2. RealtimeTotals: complete hours of the last 6 (404 / partial hours are skipped, never fatal).
+2. RealtimeTotals: complete hours of the last 24 (404 / partial hours are skipped, never fatal).
 3. Live Open-Meteo snapshot -> private bucket Parquet + `weather_snapshot_index`
    (available_at = fetched_at), unless this slot already has one.
 4. Catch-up: issue hours in the last `catchup_hours` with no champion row and no `ok` hourly run,
@@ -44,8 +44,10 @@ from gridcast.storage.objstore import ObjectStore
 from gridcast.timeutil import HOUR, est_date, floor_hour
 
 JOB = "hourly"
-CATCHUP_HOURS = 6
-REALTIME_LOOKBACK_H = 6
+# Both were 6 until 2026-11-23: with GitHub cron alone (10-26 to 11-01) run gaps reached 7 h,
+# one hour short of losing champion and RealtimeTotals hours for good (DATA_NOTES §21.4).
+CATCHUP_HOURS = 24
+REALTIME_LOOKBACK_H = 24
 ADEQUACY_MAX_AGE = timedelta(hours=6)
 
 
