@@ -41,8 +41,11 @@ Shipped (all CI green on the branch before `main` was fast-forwarded):
   GridCast beat IESO day-ahead (2.38 % vs 2.43 %) was wrong: for issue days 10-28 to 11-01
   IESO's day-ahead MAPE is 1.37 % (97 of 120 hours scored so far) against GridCast's 2.86 %.
   Champion rows were not touched.
-- Docs: the GitHub cron description corrected (ADR-0012 amendment, `hourly.yml`, DATA_NOTES
-  §17.1), DATA_NOTES §21, this log.
+- Docs: the GitHub cron description corrected (ADR-0012 amendment, ADR-0001 note, `hourly.yml`,
+  DATA_NOTES §17.1), DATA_NOTES §21, this log. C20 ADRs: ADR-0003 (LightGBM champion, TCN
+  challenger planned), ADR-0005 (`champion.json` authoritative), ADR-0006 (precomputed serving),
+  ADR-0007 (promotion gate), ADR-0008 (interval ladder); ADR-0004 accepted with its open items
+  closed.
 
 M6: this entry restarts the zero-intervention clock at 2026-11-23. With no further intervention,
 60 days are reached on 2027-01-22.

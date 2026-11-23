@@ -1,9 +1,10 @@
-# ADR-0004: Availability model and as-of rule (DRAFT)
+# ADR-0004: Availability model and as-of rule
 
-- Status: **Draft**. It is finalised in C20 once the full-day RealtimeTotals observation and the
-  RealtimeTotals derivation decision are in.
-- Date: 2026-10-23
-- Related: BUILD_PLAN §3.1, §3.2, §3.4, §4.6, §6.1 step 2; ADR-0002; `docs/DATA_NOTES.md` §0, §6
+- Status: **Accepted** 2026-11-23 (draft of 2026-10-23; the open items are closed at the end,
+  with the live evidence).
+- Date: 2026-10-23, finalised 2026-11-23
+- Related: BUILD_PLAN §3.1, §3.2, §3.4, §4.6, §6.1 step 2; ADR-0002; `docs/DATA_NOTES.md` §0, §6,
+  §21
 
 ## Context
 
@@ -60,10 +61,15 @@ of the hour.
 - The IESO comparison for issue T uses the latest Adequacy3 version created at or before
   `data_cutoff`, never a later reissue.
 - `ieso_staleness = data_cutoff − created_at` is stored per row.
+- In practice the hourly row is written at about :02, so it holds the newest version IESO had
+  published by then; IESO's ~:25 reissue is not used for that hour. A repair of past IESO rows
+  (`gridcast repair ieso-rows`) is capped the same way, at the moment the live row was written,
+  so it never hands IESO a version published after GridCast's forecast (DATA_NOTES §21.8).
 
 **Catch-up policy.**
-- Each hourly run re-runs up to the last 6 issue hours that have no `champion` row, oldest first,
-  with `run_kind='catchup'`. Each re-run uses its own `data_cutoff`.
+- Each hourly run re-runs up to the last 24 issue hours (6 until 2026-11-23, DATA_NOTES §21.4)
+  that have no `champion` row, oldest first, with `run_kind='catchup'`. Each re-run uses its own
+  `data_cutoff`.
 - A missed hour H gets weather **only** from the newest archived snapshot with
   `available_at ≤ H + 30 min` that still covers H+1…H+24. **It never uses the current forecast.**
 - If such a snapshot exists, the row is written and scored normally, but it counts as *missed* for
@@ -83,7 +89,7 @@ of the hour.
   intended, because a back-dated forecast with today's weather would be leakage.
 - Changing any rule changes the training lag, so it requires a retrain and an ADR update.
 
-## Open items (to close before "Accepted")
+## Open items of the draft (closed 2026-11-23; resolutions below the list)
 
 1. **RealtimeTotals carries Market Demand, not Ontario Demand.** Choose one:
    - (a) derive Ontario ≈ Market − scheduled exports + c;
@@ -99,6 +105,22 @@ of the hour.
    (DATA_NOTES Contradiction 3).
 4. **Pin `models=gfs_seamless`** in both Open-Meteo APIs. `best_match` resolves to it at Toronto
    today, and pinning it prevents silent train/serve model drift.
+
+**Resolutions.**
+
+1. **(b): Market Demand as a feature only.** RealtimeTotals feeds the `mkt_*` features (`L0` is
+   Market Demand); Ontario Demand comes only from `PUB_Demand`. No provisional scoring: scores
+   arrive daily (DATA_NOTES Contradiction 1, plan §3.0 decision 1).
+2. **`REALTIME_LAG_H = 1` is final.** The 25-hour observation stopped after ~21 h (partial file
+   kept), but the live record settles it: for the 435 issue hours from 2026-11-05 to 11-22 the
+   served L0 was exactly 1 h old every time, with no fallback, and the daily `l0_lag_parity`
+   metric was 1.0 h (training lag 1 h) on every day. The breach of 10-27 to 10-31 was a scheduler
+   artefact (runs hours late), not a lag error (DATA_NOTES §21).
+3. **No staleness exclusion for IESO.** The benchmark is the latest version created at or before
+   the cutoff, whatever its age (plan §3.0 decision 3); its age is stored per row. Since the
+   Cloudflare scheduler (11-02 onwards) the mean age is 1.6 to 2.5 h per issue day, the maximum
+   13 to 17 h (IESO's own overnight gap).
+4. **Done:** `MODEL = "gfs_seamless"` in `ingest/openmeteo.py` for both APIs.
 
 ## Alternatives rejected
 

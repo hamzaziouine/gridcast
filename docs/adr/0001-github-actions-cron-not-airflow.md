@@ -41,7 +41,9 @@ Benefits:
 Costs, and how the design absorbs them:
 - GitHub cron is best-effort. Runs can be delayed 5–30 min at busy minutes, or skipped. Two
   slots per hour, the `data_cutoff` rule (ADR-0004) and a 6-hour catch-up absorb this, and M4
-  measures it honestly.
+  measures it honestly. *Note 2026-11-23:* measured, GitHub fired only 5 to 7 % of slots, so
+  a Cloudflare Worker cron now dispatches the jobs (ADR-0014; ADR-0012 amendment) and catch-up
+  covers 24 hours.
 - Scheduled workflows are disabled after 60 days without repository activity, which
   `keepalive.yml` handles.
 - There is no DAG UI, backfill UI or task-level retry. Dependencies are expressed as ordered steps
