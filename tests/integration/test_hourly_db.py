@@ -76,12 +76,13 @@ def test_first_run_forecasts_and_leaves_honest_gaps(env: Any) -> None:
     out = _run(env, T0 + timedelta(minutes=7))
     assert out["status"] == "ok", out
     assert out["rows_written"]["champion"] == 24
-    assert out["realtime"]["missing"] == 6  # every RealtimeTotals hour 404: degraded, not failed
+    # every RealtimeTotals hour 404: degraded, not failed
+    assert out["realtime"]["missing"] == hourly.REALTIME_LOOKBACK_H == 24
     assert out["weather"] == "stored"
     assert champion_count(eng, T0) == 24
-    # 6 catch-up hours: no snapshot existed at their cutoffs -> baselines + IESO only, no champion
-    assert len(out["catchup"]) == 6
-    for h in range(1, 7):
+    # 24 catch-up hours: no snapshot existed at their cutoffs -> baselines + IESO only, no champion
+    assert len(out["catchup"]) == hourly.CATCHUP_HOURS == 24
+    for h in range(1, hourly.CATCHUP_HOURS + 1):
         assert champion_count(eng, T0 - timedelta(hours=h)) == 0
         assert _runs(eng, T0 - timedelta(hours=h)) == [("catchup", "ok")]
     assert any("no qualifying weather snapshot" in n for n in out["notes"])
