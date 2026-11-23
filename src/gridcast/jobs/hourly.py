@@ -111,6 +111,11 @@ def _predict_hour(
         notes.add(f"shadow {issue:%Y-%m-%dT%HZ}: {out['shadow_error']} (champion unaffected)")
     if out.get("live_features_error"):
         notes.add(f"live_features {issue:%Y-%m-%dT%HZ}: {out['live_features_error']}")
+    if out.get("baselines_missing"):
+        notes.add(
+            f"baselines {issue:%Y-%m-%dT%HZ}: {out['baselines_missing']} rows without visible"
+            " input (stale actuals?)"
+        )
     return dict(out["rows_written"])
 
 

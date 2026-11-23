@@ -120,3 +120,25 @@ def test_predict_writes_all_model_rows_and_respects_insert_only(
             text("SELECT p50 FROM predictions WHERE model_id = 1 AND horizon = 1")
         ).scalar_one()
     assert p50 == before
+
+
+def test_stale_actuals_drop_baseline_horizons_but_keep_the_champion(
+    engine: Engine, store: ObjectStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Incident 2026-11-03: final actuals stopped ~49 h before the issue, seasonal_naive_24 had
+    no visible input for its late horizons, the NaN p50 failed the contract and the champion's
+    24 rows were lost with it. Those baseline horizons are now left out instead."""
+    issue = ISSUE + timedelta(days=2)
+    real = predict.load_history
+
+    def stale(eng: Engine, start: datetime, end: datetime) -> pd.DataFrame:
+        raw = real(eng, start, end)
+        return raw[raw["target_time"] < pd.Timestamp(issue - timedelta(hours=60))]
+
+    monkeypatch.setattr(predict, "load_history", stale)
+    out = predict.run(engine, store, issue)
+    written = out["rows_written"]
+    assert written["champion"] == 24
+    assert written["seasonal_naive_168"] == 24 and written["persistence"] == 24
+    assert 0 < written["seasonal_naive_24"] < 24
+    assert out["baselines_missing"] == 24 - written["seasonal_naive_24"]

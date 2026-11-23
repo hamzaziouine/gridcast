@@ -12,7 +12,8 @@
   `live_features_error` and never blocks the forecast.
 - Baselines: seasonal_naive_168 / _24 / persistence on the same as-of history; p10/p90 from each
   baseline's own relative residuals over the 60 days before the cutoff, using only actuals
-  visible at the cutoff.
+  visible at the cutoff. A baseline horizon with no visible input is left out (counted in
+  `baselines_missing`), never written as NaN.
 - ieso_adequacy: per target, the latest Adequacy3 snapshot with created_at <= data_cutoff (plan
   §3.0 decision 3: whatever its age); p10/p90 NULL; the snapshot created_at is the version.
 - Weather: `store` = weather_hourly (historical-forecast archive, synthetic stamps); `live` = one
@@ -108,6 +109,11 @@ def baseline_rows(history: DemandHistory, issue: datetime) -> pd.DataFrame:
         p10, p90 = off.apply(rows.loc[m, "p50"].to_numpy(), rows.loc[m, "horizon"].to_numpy())
         rows.loc[m, "p10"], rows.loc[m, "p90"] = p10, p90
     rows["model_version"] = rows["model_name"]
+    # A baseline whose input is not visible at the cutoff has no forecast for that horizon (e.g.
+    # seasonal_naive_24 once the newest final actual is more than ~48 h old). Drop those rows:
+    # a NaN p50 would fail the Predictions contract for the whole issue hour, champion included
+    # (incident 2026-11-03, DATA_NOTES §21).
+    rows = rows[rows["p50"].notna()]
     return rows.drop(columns=["input_available_at"])
 
 
@@ -282,7 +288,9 @@ def run(
     else:
         wx = load_weather(engine, issue - timedelta(hours=30), issue + timedelta(hours=24))
     history = DemandHistory.from_raw(raw)
-    parts = [baseline_rows(history, issue), ieso_rows(engine, issue)]
+    baselines = baseline_rows(history, issue)
+    baselines_missing = len(BASELINES) * 24 - len(baselines)
+    parts = [baselines, ieso_rows(engine, issue)]
     champ: dict[str, Any] | None = None
     max_avail = None
     shadow_error: str | None = None
@@ -330,6 +338,7 @@ def run(
         ),
         "rows_built": {str(k): int(v) for k, v in counts.items()},
         "rows_written": written,
+        "baselines_missing": baselines_missing,
         "max_input_available_at": max_avail,
         "shadow_error": shadow_error,
         "prev_error": prev_error,
