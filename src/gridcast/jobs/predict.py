@@ -117,8 +117,10 @@ def baseline_rows(history: DemandHistory, issue: datetime) -> pd.DataFrame:
     return rows.drop(columns=["input_available_at"])
 
 
-def ieso_rows(engine: Engine, issue: datetime) -> pd.DataFrame:
-    cutoff = data_cutoff(issue)
+def ieso_rows(engine: Engine, issue: datetime, as_of: datetime | None = None) -> pd.DataFrame:
+    """`as_of` (repairs only) caps the snapshot time below the cutoff: the moment the live row
+    was written, so a repair restores what IESO had published by then, never more."""
+    cutoff = data_cutoff(issue) if as_of is None else min(data_cutoff(issue), as_of)
     targets = [issue + timedelta(hours=h) for h in range(1, 25)]
     with engine.connect() as conn:
         df = pd.read_sql(
@@ -224,9 +226,16 @@ def _version_ids(conn: Connection, versions: list[str]) -> dict[str, int]:
 
 
 def write_predictions(
-    engine: Engine, rows: pd.DataFrame, run_id: uuid.UUID, run_kind: str
+    engine: Engine,
+    rows: pd.DataFrame,
+    run_id: uuid.UUID,
+    run_kind: str,
+    touch_runs: bool = True,
 ) -> dict[str, int]:
-    """Write rows (contract-checked) into predictions / prediction_runs. Returns rows per model."""
+    """Write rows (contract-checked) into predictions / prediction_runs. Returns rows per model.
+
+    `touch_runs=False` (repairs) leaves the existing prediction_runs row as it is: its run_kind
+    and created_at keep recording when and how the hour was first forecast."""
     contracts.Predictions.validate(rows)
     written: dict[str, int] = {}
     with engine.begin() as conn:
@@ -238,7 +247,7 @@ def write_predictions(
         issue = rows["issue_time"].iloc[0].to_pydatetime()
         for name, g in rows.groupby("model_name"):
             insert_only = name in INSERT_ONLY
-            run_sql = RUN_INSERT_ONLY if insert_only else RUN_UPSERT
+            run_sql = RUN_INSERT_ONLY if insert_only or not touch_runs else RUN_UPSERT
             conn.execute(
                 text(run_sql), {"i": issue, "m": ids[str(name)], "r": run_id, "k": run_kind}
             )

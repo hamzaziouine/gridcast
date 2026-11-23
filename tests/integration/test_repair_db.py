@@ -85,9 +85,30 @@ def test_apply_rewrites_the_rows_as_of_the_cutoff(engine: Engine) -> None:
     ieso = _ieso(engine)
     assert len(ieso) == 24
     assert (ieso["p50"] == 15000).all()  # v2 (created 11:00Z <= 12:30Z), never v3 (14:00Z)
-    assert set(ieso["run_kind"]) == {"manual"}
+    assert set(ieso["run_kind"]) == {"scheduled"}  # the run row keeps its first forecast
     again = repair.ieso_rows(engine, ISSUE, ISSUE, apply=True)
     assert (again["rows_unchanged"], again["rows_changed"], again["rows_new"]) == (24, 0, 0)
     assert again["rows_written"] == 0
     with engine.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM prediction_runs")).scalar_one() == 1
+        n = conn.execute(
+            text("SELECT count(*) FROM pipeline_runs WHERE job = 'repair_ieso_rows'")
+        ).scalar_one()
+    assert n == 2
+
+
+def test_never_uses_a_reissue_newer_than_the_live_row(engine: Engine) -> None:
+    """A version created after GridCast wrote the row (but before the cutoff) is not used."""
+    with engine.begin() as conn:
+        _snapshot(conn, ISSUE + timedelta(minutes=20), 16000.0, 4)  # 12:20Z <= cutoff 12:30Z
+        conn.execute(
+            text("UPDATE prediction_runs SET created_at = :t"), {"t": ISSUE + timedelta(minutes=3)}
+        )
+    out = repair.ieso_rows(engine, ISSUE, ISSUE)
+    assert (out["rows_unchanged"], out["rows_changed"]) == (24, 0)  # still v2 (11:00Z)
+    with engine.begin() as conn:  # a row written after the cutoff (catch-up) gets the full rule
+        conn.execute(
+            text("UPDATE prediction_runs SET created_at = :t"), {"t": ISSUE + timedelta(hours=5)}
+        )
+    out = repair.ieso_rows(engine, ISSUE, ISSUE)
+    assert (out["rows_unchanged"], out["rows_changed"]) == (0, 24)  # v4 (12:20Z)

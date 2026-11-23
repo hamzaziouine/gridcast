@@ -4,10 +4,13 @@ BUILD_PLAN §12: live tables are never edited by hand; a repair is a CLI command
 `workflow_dispatch`, and its `docs/OPS_LOG.md` entry is tagged INTERVENTION.
 
 `ieso_rows`: rewrite the `ieso_adequacy` rows of past issue hours from the Adequacy3 snapshots now
-stored, with the same as-of rule the hourly job uses (`predict.ieso_rows`: per target, the latest
-snapshot created at or before the issue's data_cutoff). Needed when the ingest read versions late
-(10-26 to 11-01: capped at 20 files a run, oldest first, ~5 runs a day), so the row written at
-the time used an older snapshot than IESO had published (DATA_NOTES §21.2). Only issue hours that
+stored. Each row is recomputed with the hourly job's rule (`predict.ieso_rows`: per target, the
+latest snapshot created at or before the cutoff), the cutoff capped at the moment the live row was
+written (`prediction_runs.created_at`). So the repair restores what IESO had published when
+GridCast wrote the row and corrects only versions the ingest had not read yet (10-26 to 11-01:
+capped at 20 files a run, oldest first, ~5 runs a day; DATA_NOTES §21.2). It never hands IESO a
+reissue that came out after GridCast's own forecast. The prediction_runs row is left as it is
+(run kind and time of the first forecast), so a second run changes nothing. Only issue hours that
 already have an IESO run row are touched: the set of scored hours does not grow. Champion rows
 are never read or written. Dry run by default.
 """
@@ -34,7 +37,8 @@ def _stored(engine: Engine, lo: datetime, hi: datetime) -> pd.DataFrame:
     with engine.connect() as conn:
         df = pd.read_sql(
             text(
-                "SELECT r.issue_time, p.horizon, p.p50::float8 AS p50, v.model_version"
+                "SELECT r.issue_time, r.created_at AS run_at, p.horizon, p.p50::float8 AS p50,"
+                " v.model_version"
                 " FROM prediction_runs r"
                 " JOIN prediction_models m ON m.model_id = r.model_id"
                 " LEFT JOIN predictions p ON p.issue_time = r.issue_time"
@@ -46,6 +50,7 @@ def _stored(engine: Engine, lo: datetime, hi: datetime) -> pd.DataFrame:
             params={"lo": lo, "hi": hi},
         )
     df["issue_time"] = pd.to_datetime(df["issue_time"], utc=True)
+    df["run_at"] = pd.to_datetime(df["run_at"], utc=True)
     return df
 
 
@@ -78,6 +83,7 @@ def ieso_rows(
     lo, hi = floor_hour(start.astimezone(UTC)), floor_hour(end.astimezone(UTC))
     stored = _stored(engine, lo, hi)
     issues = sorted(set(stored["issue_time"]))
+    run_at = dict(zip(stored["issue_time"], stored["run_at"], strict=True))
     have = stored.dropna(subset=["horizon"])
     by_issue: dict[pd.Timestamp, dict[int, tuple[float, str]]] = {i: {} for i in issues}
     for i, h, p50, v in zip(
@@ -100,7 +106,7 @@ def ieso_rows(
     if apply:
         run_id = runs.start(engine, JOB_IESO, floor_hour(datetime.now(UTC)), "manual")
     for issue in issues:
-        fresh = predict.ieso_rows(engine, issue.to_pydatetime())
+        fresh = predict.ieso_rows(engine, issue.to_pydatetime(), run_at[issue].to_pydatetime())
         known = by_issue[issue]
         horizons = [int(h) for h in fresh["horizon"].to_numpy(int)]
         counts["rows_kept_without_snapshot"] += len(set(known) - set(horizons))
@@ -133,7 +139,9 @@ def ieso_rows(
         if changed:
             counts["issue_hours_changed"] += 1
             if run_id is not None:
-                written = predict.write_predictions(engine, fresh[COLUMNS], run_id, "manual")
+                written = predict.write_predictions(
+                    engine, fresh[COLUMNS], run_id, "manual", touch_runs=False
+                )
                 counts["rows_written"] += sum(written.values())
     out: dict[str, Any] = {"window": [lo.isoformat(), hi.isoformat()], "apply": apply, **counts}
     if old_parts:
