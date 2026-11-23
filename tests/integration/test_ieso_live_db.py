@@ -78,7 +78,14 @@ def test_adequacy_ingest_recent(engine: Engine, tmp_path: Path) -> None:
         return Fetched(url, 200, body, NOW, None)
 
     counts = a.ingest_recent(engine, fake, date(2026, 10, 23), archive_root=tmp_path)
-    assert counts == {"listed": 3, "pending": 1, "files": 1, "rows": 24, "pruned": 0}
+    assert counts == {
+        "listed": 3,
+        "pending": 1,
+        "skipped": 0,
+        "files": 1,
+        "rows": 24,
+        "pruned": 0,
+    }
     archived = tmp_path / "ieso/adequacy3/2026/10/24/PUB_Adequacy3_20261024_v68.xml.gz"
     assert gzip.decompress(archived.read_bytes()).decode() == xml
     with engine.connect() as conn:
@@ -172,6 +179,70 @@ def test_pruned_versions_are_not_downloaded_again(engine: Engine) -> None:
 
     counts = a.ingest_recent(engine, fake, d, days_ahead=0, archive_root=None)
     assert counts["pending"] == 0 and requested == [a.BASE_URL]
+
+
+def test_newest_first_skips_versions_the_prune_would_delete(engine: Engine) -> None:
+    """Delivery 2026-11-05 (retention cutoff 11-03 00:00 EST): v5 and v4 are after the cutoff,
+    v3 is the newest before it; v1-v2 would be pruned straight after reading, so they are never
+    fetched, and a second run does not fetch them either."""
+    xml = (FIXTURES / "ieso_adequacy_sample.xml").read_text()
+    xml = xml.replace(
+        "<DeliveryDate>2026-10-24</DeliveryDate>", "<DeliveryDate>2026-11-05</DeliveryDate>"
+    )
+    created = {  # EST wall time, as in CreatedAt
+        1: "2026-10-20T10:00:00",
+        2: "2026-11-01T10:00:00",
+        3: "2026-11-02T23:00:00",
+        4: "2026-11-03T10:00:00",
+        5: "2026-11-04T10:00:00",
+    }
+    now = datetime(2026, 11, 4, 16, tzinfo=UTC)
+    listing = "".join(f'<a href="PUB_Adequacy3_20261105_v{v}.xml">x</a>' for v in created)
+    requested: list[str] = []
+
+    def fake(url: str) -> Fetched:
+        if url == a.BASE_URL:
+            return Fetched(url, 200, listing, now, None)
+        requested.append(url.rsplit("/", 1)[-1])
+        v = int(url.rsplit("_v", 1)[-1].removesuffix(".xml"))
+        body = xml.replace(
+            "<CreatedAt>2026-10-23T12:53:16</CreatedAt>", f"<CreatedAt>{created[v]}</CreatedAt>"
+        )
+        return Fetched(url, 200, body, now, None)
+
+    counts = a.ingest_recent(engine, fake, date(2026, 11, 5), days_ahead=0, archive_root=None)
+    assert requested == [f"PUB_Adequacy3_20261105_v{v}.xml" for v in (5, 4, 3)]
+    assert (counts["pending"], counts["skipped"], counts["files"], counts["pruned"]) == (5, 2, 3, 0)
+    again = a.ingest_recent(engine, fake, date(2026, 11, 5), days_ahead=0, archive_root=None)
+    assert (again["pending"], again["skipped"], again["files"]) == (0, 2, 0)
+    assert requested == [f"PUB_Adequacy3_20261105_v{v}.xml" for v in (5, 4, 3)]
+
+
+def test_capped_run_reads_the_newest_versions_first(engine: Engine) -> None:
+    xml = (FIXTURES / "ieso_adequacy_sample.xml").read_text()
+    xml = xml.replace(
+        "<DeliveryDate>2026-10-24</DeliveryDate>", "<DeliveryDate>2026-10-28</DeliveryDate>"
+    )
+    now = datetime(2026, 10, 27, 12, tzinfo=UTC)
+    listing = "".join(f'<a href="PUB_Adequacy3_20261028_v{v}.xml">x</a>' for v in range(1, 6))
+    requested: list[str] = []
+
+    def fake(url: str) -> Fetched:
+        if url == a.BASE_URL:
+            return Fetched(url, 200, listing, now, None)
+        requested.append(url.rsplit("/", 1)[-1])
+        v = int(url.rsplit("_v", 1)[-1].removesuffix(".xml"))
+        body = xml.replace(
+            "<CreatedAt>2026-10-23T12:53:16</CreatedAt>",
+            f"<CreatedAt>2026-10-27T0{v}:00:00</CreatedAt>",  # all after the 10-26 cutoff
+        )
+        return Fetched(url, 200, body, now, None)
+
+    counts = a.ingest_recent(
+        engine, fake, date(2026, 10, 28), days_ahead=0, max_files=2, archive_root=None
+    )
+    assert requested == ["PUB_Adequacy3_20261028_v5.xml", "PUB_Adequacy3_20261028_v4.xml"]
+    assert (counts["pending"], counts["skipped"], counts["files"]) == (5, 0, 2)
 
 
 def test_adequacy_archive_to_object_store(engine: Engine) -> None:

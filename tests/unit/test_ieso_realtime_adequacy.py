@@ -109,19 +109,37 @@ def test_adequacy_without_namespace_finds_nothing() -> None:
         a.parse_adequacy(xml.encode())
 
 
-def test_pending_files_oldest_first() -> None:
+def test_pending_files_newest_first_round_robin() -> None:
     listing = [
         "PUB_Adequacy3.xml",
         "PUB_Adequacy3_20261024.xml",
         "PUB_Adequacy3_20261024_v10.xml",
         "PUB_Adequacy3_20261024_v9.xml",
         "PUB_Adequacy3_20261023_v97.xml",
+        "PUB_Adequacy3_20261023_v96.xml",
+        "PUB_Adequacy3_20261023_v95.xml",
         "PUB_Adequacy3_20261030_v1.xml",
     ]
     out = a.pending_files(
         listing, [date(2026, 10, 23), date(2026, 10, 24)], {"PUB_Adequacy3_20261023_v97.xml"}
     )
-    assert out == ["PUB_Adequacy3_20261024_v9.xml", "PUB_Adequacy3_20261024_v10.xml"]
+    # Each date's newest pending version first, then each date's second newest, ...
+    assert out == [
+        "PUB_Adequacy3_20261023_v96.xml",
+        "PUB_Adequacy3_20261024_v10.xml",
+        "PUB_Adequacy3_20261023_v95.xml",
+        "PUB_Adequacy3_20261024_v9.xml",
+    ]
+
+
+def test_pending_files_skip_versions_below_the_retention_floor() -> None:
+    listing = [f"PUB_Adequacy3_20261024_v{v}.xml" for v in range(1, 7)]
+    out = a.pending_files(listing, [date(2026, 10, 24)], set(), {date(2026, 10, 24): 4})
+    assert out == [f"PUB_Adequacy3_20261024_v{v}.xml" for v in (6, 5, 4)]
+
+
+def test_retention_cutoff_is_d_minus_2_midnight_est() -> None:
+    assert a.retention_cutoff(date(2026, 12, 10)) == datetime(2026, 12, 8, 5, tzinfo=UTC)
 
 
 def test_archive_path(tmp_path: Path) -> None:

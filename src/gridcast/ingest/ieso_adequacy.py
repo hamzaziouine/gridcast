@@ -1,4 +1,4 @@
-"""IESO Adequacy3 -> ieso_forecast_snapshots, every `_vN` version kept (C4).
+"""IESO Adequacy3 -> ieso_forecast_snapshots, one snapshot per `_vN` version read (C4).
 
 Source facts (docs/DATA_NOTES.md §3, plan §3.0 decision 3):
 - `PUB_Adequacy3_YYYYMMDD_vN.xml`, one series of versions per delivery date; IESO keeps ~3 months.
@@ -14,7 +14,9 @@ date), in the private bucket when an object store is passed, else under a local,
 the bucket.
 
 Every file read is recorded in `ieso_adequacy_files` (migration 0003); the listing is compared
-with that ledger, so a version whose rows were pruned is not downloaded again.
+with that ledger, so a version whose rows were pruned is not downloaded again. Pending versions
+are read newest first, and versions the prune would delete straight away are not read at all
+(`pending_files`, DATA_NOTES §21.2): they are neither stored nor archived.
 
 Retention (`prune_snapshots`, DATA_NOTES §15): for delivery date D keep every version created at or
 after (D - 2 days) 00:00 EST, plus the newest version created before that. Issue times whose 24
@@ -43,7 +45,9 @@ from gridcast.timeutil import EST, he_to_utc
 BASE_URL = "https://reports-public.ieso.ca/public/Adequacy3/"
 NS = {"i": "http://www.ieso.ca/schema"}
 DEFAULT_ARCHIVE_ROOT = Path("data/raw")
-MAX_FILES_PER_RUN = 20  # plan §6.1 step 0
+# Plan §6.1 step 0 had 20. With 20, oldest first, a run cadence of ~5 runs/day (GitHub cron only,
+# 10-26 to 11-01) left the stored IESO snapshot up to ~2.5 days old (DATA_NOTES §21.2).
+MAX_FILES_PER_RUN = 60
 
 _NAME_RE = re.compile(r"^PUB_Adequacy3_(\d{8})_v(\d+)\.xml$")
 
@@ -105,17 +109,58 @@ def archive_key(file_name: str, delivery_date: date) -> str:
     return f"{ARCHIVE_PREFIX}{delivery_date:%Y/%m/%d}/{file_name}.gz"
 
 
+def retention_cutoff(delivery_date: date) -> datetime:
+    """(delivery_date - RETENTION_DAYS) 00:00 EST, as UTC: the prune rule's cutoff."""
+    d = delivery_date - timedelta(days=RETENTION_DAYS)
+    return datetime(d.year, d.month, d.day, tzinfo=EST).astimezone(UTC)
+
+
 def pending_files(
-    listing: Iterable[str], delivery_dates: Iterable[date], stored: set[str]
+    listing: Iterable[str],
+    delivery_dates: Iterable[date],
+    stored: set[str],
+    floors: dict[date, int] | None = None,
 ) -> list[str]:
-    """Versioned files for the given delivery dates that are not stored yet, oldest first."""
+    """Versioned files for the given delivery dates that are not stored yet, newest first.
+
+    Order: every date's newest pending version, then every date's second newest, and so on, so a
+    run that hits MAX_FILES_PER_RUN still reads the snapshots the next forecasts use (the latest
+    one created before each cutoff) before older reissues. Versions below `floors[date]` are left
+    out: a version of that date created before its retention cutoff is already stored, so every
+    older version would be pruned straight after it was read (`_vN` numbers grow with CreatedAt).
+    """
     wanted = set(delivery_dates)
-    found = []
+    floors = floors or {}
+    by_date: dict[date, list[tuple[int, str]]] = {}
     for name in listing:
         parsed = parse_file_name(name)
-        if parsed and parsed[0] in wanted and name not in stored:
-            found.append((parsed, name))
-    return [name for _, name in sorted(found)]
+        if parsed is None or parsed[0] not in wanted or name in stored:
+            continue
+        d, version = parsed
+        if version < floors.get(d, 0):
+            continue
+        by_date.setdefault(d, []).append((version, name))
+    ranked = [
+        (rank, d, name)
+        for d, found in by_date.items()
+        for rank, (_, name) in enumerate(sorted(found, reverse=True))
+    ]
+    return [name for _, _, name in sorted(ranked)]
+
+
+def retention_floors(engine: Engine, dates: list[date]) -> dict[date, int]:
+    """Per delivery date: the newest stored version created before the retention cutoff."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT delivery_date, max(version) FROM ieso_adequacy_files"
+                " WHERE delivery_date = ANY(:dates) AND created_at <"
+                " ((delivery_date - CAST(:days AS integer))::timestamp + interval '5 hours')"
+                " AT TIME ZONE 'UTC' GROUP BY delivery_date"
+            ),
+            {"dates": dates, "days": RETENTION_DAYS},
+        ).all()
+    return {r[0]: int(r[1]) for r in rows}
 
 
 def store_snapshot(
@@ -179,10 +224,12 @@ def ingest_recent(
     archive_root: Path | None = DEFAULT_ARCHIVE_ROOT,
     store: ObjectStore | None = None,
 ) -> dict[str, int]:
-    """Store every not-yet-read version for delivery dates today .. today + days_ahead (EST).
+    """Store not-yet-read versions for delivery dates today .. today + days_ahead (EST), newest
+    first, at most `max_files` per run, skipping versions the retention prune would delete at once
+    (`pending_files`).
 
     The raw XML goes to `store` when given, else under `archive_root`. Returns counts: listed,
-    pending, files, rows, pruned.
+    pending (after the skip), skipped, files, rows, pruned.
     """
     dates = [today_est + timedelta(days=k) for k in range(days_ahead + 1)]
     listing = fetch(BASE_URL)
@@ -199,11 +246,32 @@ def ingest_recent(
                 {"dates": dates},
             )
         }
-    todo = pending_files(names, dates, stored)
-    counts = {"listed": len(names), "pending": len(todo), "files": 0, "rows": 0}
+    floors = retention_floors(engine, dates)
+    every = pending_files(names, dates, stored)
+    todo = pending_files(names, dates, stored, floors)
+    counts = {
+        "listed": len(names),
+        "pending": len(todo),
+        "skipped": len(every) - len(todo),
+        "files": 0,
+        "rows": 0,
+    }
     newest: datetime | None = None
     last_fetch: datetime | None = None
-    for name in todo[:max_files]:
+    attempts = 0
+    capped = False
+    for name in todo:
+        parsed = parse_file_name(name)
+        if parsed is None:  # pending_files only returns versioned names
+            continue
+        d, version = parsed
+        if version < floors.get(d, 0):
+            counts["skipped"] += 1  # a newer version of this date, read now, is below its cutoff
+            continue
+        if attempts == max_files:
+            capped = True
+            break
+        attempts += 1
         fetched = fetch(BASE_URL + name)
         if fetched.status != 200:
             continue  # listed but gone or not yet readable; the next slot retries
@@ -220,9 +288,11 @@ def ingest_recent(
             path.write_bytes(body)
         counts["rows"] += store_snapshot(engine, snap, name, fetched.fetched_at, archived_as)
         counts["files"] += 1
+        if snap.created_at < retention_cutoff(d):
+            floors[d] = max(floors.get(d, 0), version)
         newest = max(newest, snap.created_at) if newest else snap.created_at
         last_fetch = fetched.fetched_at
-    if newest is not None and last_fetch is not None and len(todo) <= max_files:
+    if newest is not None and last_fetch is not None and not capped:
         # All pending versions were read, so the newest one IESO lists is among them.
         contracts.check_newest_snapshot(newest, last_fetch)
     counts["pruned"] = prune_snapshots(engine)["rows_deleted"]
