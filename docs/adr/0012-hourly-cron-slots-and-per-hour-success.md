@@ -38,7 +38,8 @@ whole hours, which only the next hour's catch-up can fill (those hours count as 
 
 1. **Cron `2,12,22 * * * *`.** Three chances per hour instead of two. The first is as early as
    the inputs allow: a complete RealtimeTotals hour lands at :53–:57 of the hour it covers, so the
-   L0 hour is in at :02. With a 15–25 min delay the first slot lands at ~:17–:27, before the
+   L0 hour is in at :02. With a 15 to 25 min delay (the assumption on 2026-10-24; measured
+   behaviour was much worse, see the amendment) the first slot lands at ~:17 to :27, before the
    cutoff, so it uses its own fresh snapshot. The :22 slot (landing ~:37–:47) still picks up the
    ~:25 Adequacy3 reissue, and the next hour's :02 slot picks up the ~:55 one.
 2. **Success is judged per issue hour.** Status `ok` means "issue hour H has its 24 champion
@@ -75,3 +76,21 @@ Integration tests: `test_late_run_after_the_cutoff_uses_the_previous_snapshot_an
   already covers a dropped hour.
 - **An external scheduler pinging `workflow_dispatch`.** Adds a credentialled service outside the
   repo for a gain in M4 only. Revisit if M4 is far below target after a week.
+
+## Amendment (2026-11-23): the measured GitHub cron
+
+The "15 to 25 min late" figure came from one day of runs and was wrong as a description of GitHub's
+scheduler. Measured on this repository (DATA_NOTES §21.6):
+
+| period | trigger | slots | runs started | share | median gap between runs |
+|---|---|---:|---:|---:|---:|
+| 2026-10-26 → 11-01 | GitHub cron only | 564 | 40 | 7.1 % | 277 min |
+| 2026-11-01 18Z → 11-23 01Z | GitHub cron (fallback) | 1,534 | 80 | 5.2 % | 390 min |
+| 2026-11-01 18Z → 11-23 01Z | Cloudflare cron (ADR-0014) | ~1,023 | 1,022 | ~100 % | 20 min |
+
+So GitHub drops most slots outright; a lateness window is not the right model. The decisions
+above still hold (per-hour success, the cutoff never moves), but the primary trigger is now the
+Cloudflare Worker cron at `:02` and `:22` (ADR-0014). The GitHub `2,12,22` schedule stays as a
+fallback: GitHub minutes are free for a public repository, and a run for an hour that is already
+`ok` ends `skipped` after one Adequacy3 listing. Catch-up was widened from 6 to 24 issue hours on
+the same date (DATA_NOTES §21.4).

@@ -3,8 +3,11 @@ name: hourly
 # C10: ingest RealtimeTotals + Adequacy3, archive the live weather snapshot, forecast the current
 # issue hour (with honest catch-up of missed hours), publish latest/*.json. CLI: gridcast run hourly.
 #
-# Cron slots (ADR-0012): :02, :12, :22. GitHub starts scheduled runs 15-25+ min late and drops
-# some slots outright, so three slots per hour, the first as early as the inputs allow: a complete
+# Triggers: the Cloudflare Worker cron dispatches this workflow at :02 and :22 (ADR-0014; the
+# primary scheduler since 2026-11-01). The GitHub cron below is only a fallback. Measured, it is
+# far worse than "a few minutes late": 40 of 564 slots fired (7 %) from 10-26 to 11-01, with a
+# median gap of 277 min between runs, and about 5 % of slots from 11-01 to 11-23 (DATA_NOTES
+# §21.6). Its slots (ADR-0012) are :02, :12, :22, the first as early as the inputs allow: a complete
 # RealtimeTotals hour lands at :53-:57 of the hour it covers, so at :02 the L0 hour
 # (issue - REALTIME_LAG_H = 1 h) is in. Success is judged per issue hour: the first run that
 # writes the hour's 24 champion rows marks it `ok`; later slots for the same hour are `skipped`

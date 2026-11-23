@@ -1068,6 +1068,10 @@ later than `issue_time + 30 min`. C10 stores these snapshots in the bucket.
   (§1.4). Slots queue in the `hourly` concurrency group (`cancel-in-progress: false`); the first
   to write the hour's 24 champion rows marks it `ok`, later ones end `skipped` (success ping) and
   still ingest Adequacy3 reissues.
+- **Correction (2026-11-23):** GitHub's cron is not "15 to 25 min late". It drops most slots:
+  7 % of slots fired from 10-26 to 11-01 and about 5 % from 11-01 to 11-23 (§21.6). Since
+  2026-11-01 the Cloudflare Worker cron (`:02`, `:22`, ADR-0014) is the primary trigger; the
+  GitHub schedule is a fallback.
 - A run that starts after the cutoff cannot use its own snapshot (`available_at = fetched_at` >
   cutoff); it falls back to the newest earlier snapshot that covers the hour, as catch-up does.
 - `REALTIME_LAG_H` stays at the provisional 1 (§1.4's day-long observation is still open).
@@ -1084,7 +1088,8 @@ later than `issue_time + 30 min`. C10 stores these snapshots in the bucket.
 
 ### 17.3 Catch-up, degradation, idempotency
 
-- Catch-up: the last 6 issue hours with no champion row and no `ok` hourly run, oldest first,
+- Catch-up: the last 24 issue hours (6 until 2026-11-23, §21.4) with no champion row and no `ok`
+  hourly run, oldest first,
   `run_kind='catchup'`, each with its own cutoff. No qualifying snapshot → no champion row
   (visible gap); baselines and `ieso_adequacy` are still written; the hour gets an `ok`
   (`catchup`) `pipeline_runs` row with a note so it is not retried every hour. A catch-up hour
@@ -1486,7 +1491,10 @@ CI's `fresh-clone` job on the C15 commit (`2a8d7f7`, ubuntu, empty uv cache): cl
   keepalive `gate_stale`.
 - `pg_database_size` on Neon after this session's work: **75,595,776 B (75.6 MB)**.
 
-### 20.5 Open: the Cloudflare dispatch stopped (2026-10-25 06:3xZ) and did not come back
+### 20.5 Resolved 2026-11-01: the Cloudflare dispatch stopped (2026-10-25 06:3xZ)
+
+Root cause and fix: §21.1. The text below is the state on 2026-10-25.
+
 
 - After the Worker restore (`7d7ff48`, pushed 08:10:28Z) the 08:22 slot (inside the ≤ 15 min
   propagation window) and the **09:02 slot (52 min later) dispatched nothing either**. So the
@@ -1505,3 +1513,137 @@ CI's `fresh-clone` job on the C15 commit (`2a8d7f7`, ubuntu, empty uv cache): cl
   Workers Logs (observability is on): the `scheduled` events print one JSON line per trigger,
   e.g. `{"status":"http-401"}` or `"no-token"`. Until this is fixed the hourly loop runs only
   on GitHub cron, which is dropping most slots.
+
+## 21. Operations 2026-11-01 to 2026-11-23: scheduler fix, Core live, one incident, IESO repair
+
+Numbers below come from `gh run list` (hourly.yml, daily.yml) and read-only queries on Neon,
+taken 2026-11-23 ~01:45Z. Window: issue hours 2026-11-01 18:00Z to 2026-11-23 01:00Z (512 hours).
+
+### 21.1 Cloudflare dispatch: root cause and fix (2026-11-01)
+
+- Root cause of §20.5: `GH_DISPATCH_TOKEN` had been added in the Cloudflare dashboard as a
+  plain-text variable. The first `wrangler deploy` after that (`a58f7f9`, 10-25 06:33Z) removed
+  it, because wrangler replaces dashboard text variables unless `keep_vars` is set. From then on
+  `dispatch()` returned `no-token` silently. `1333d2b` made the outcome visible in `/health`
+  (`dispatcher.status`), which showed `no-token` on 11-01 16:22Z.
+- Fix: `aa20c8f` (`"keep_vars": true` in `wrangler.jsonc`; dispatch body
+  `inputs: {scheduler: "cloudflare"}` so dispatched runs are `run_kind = 'scheduled'`), and a new
+  fine-grained PAT (repository gridcast only, Actions read and write) stored as a Worker
+  **Secret**. Verified 11-01 18:02:40Z: `dispatcher.status = "dispatched"`, run 41334535515
+  started 2 s after the cron minute, `run_kind` scheduled.
+- Since then: 1,022 Cloudflare-dispatched hourly runs for about 1,023 `:02`/`:22` slots. Start
+  of the run that wrote each `ok` hour, minutes after the hour: median 3.1, p95 3.5, max 23.9.
+
+### 21.2 Adequacy3 backlog and the IESO comparison (fixed 2026-11-23)
+
+- Before: each run read at most 20 pending versions, oldest first. With about 5 runs a day
+  (GitHub cron only, 10-26 to 11-01) every run hit the cap, so the `ieso_adequacy` row of an
+  issue hour used a snapshot much older than the newest one IESO had created before the cutoff.
+  Mean age of the snapshot behind the stored IESO rows, by issue day (UTC): 10-27 1.0 h,
+  10-28 10.7 h, 10-29 93.2 h, 10-30 190.5 h, 10-31 230.2 h, 11-01 126.4 h, then 1.6 to 2.5 h
+  every day from 11-02 (max 13 to 17 h, IESO's own overnight reissue gap). Some issue hours had
+  no IESO row at the far horizons.
+- So the 2026-11-01 chart line "GridCast 2.38 % vs IESO 2.43 %" (day-ahead) was **not a valid
+  claim**: with the versions IESO had published in time, IESO's day-ahead MAPE on those days was
+  about 1.55 %. The chart is rebuilt daily over the last 7 days, and its window has had fresh IESO
+  rows since 11-09. On 11-22 it showed GridCast 1.79 % vs IESO 1.77 % day-ahead (151 hours).
+- Fix (`a38a9c4`): pending versions are read newest first (each delivery date's newest, then
+  each date's second newest, and so on); versions below a date's retention floor are not fetched
+  at all (a stored version created before `(D - 2) 00:00 EST` means every older one would be
+  pruned right after reading; about 63 of the ~118 versions per delivery date were read only to
+  be pruned, so they are now neither stored nor archived); `MAX_FILES_PER_RUN` 20 to 60. Checked
+  on the live ledger: `_vN` order equals `CreatedAt` order in all 3,728 files, and files are
+  listed within a minute of `CreatedAt` (smallest `fetched_at - created_at` 0.4 min, median
+  25 min = run cadence), so `created_at <= cutoff` is a fair as-of rule for IESO.
+- Repair of the stored rows: `gridcast repair ieso-rows` (`c09835e`, run from `repair.yml`)
+  recomputes each past IESO row with the hourly job's own rule from the snapshots now stored and
+  upserts the hours that differ. Only hours that already had an IESO run row are touched; champion
+  rows are never touched. Result in §21.8.
+
+### 21.3 Incident 2026-11-03 06Z to 11-04 12Z: 31 champion hours lost
+
+- IESO published no new final actuals between the 11-02 and 11-04 PUB_Demand files: the newest
+  actual stayed at 2026-11-01 05Z until the 11-04 13:20Z daily run ingested 73 rows. No code
+  changed in between, so this was a publication delay on IESO's side.
+- From issue hour 11-03 06Z, `seasonal_naive_24` (fallback 24/48/72 h) had no visible input for
+  its last horizons. Its NaN `p50` failed the `Predictions` contract for the whole frame, so
+  every hourly run ended `predict: SchemaError` and wrote nothing, champion included (63
+  dispatched and 5 GitHub runs failed, each pinging Healthchecks `/fail`). Catch-up could not
+  help: it applies the same as-of rule. The daily job correctly failed with `actuals_stale` 4
+  times.
+- Recovery was automatic at 11-04 13:22Z once actuals arrived. Issue hours 11-03 06Z to 11-04 12Z
+  have no rows for any model (an honest, visible gap; champion rows are never back-dated).
+- Fix (`dbb09ad`): baseline horizons with no visible input are dropped (`baselines_missing`, a
+  public note in the hourly run); the champion and the other rows are written as usual.
+- Other failures in the window, all recovered by the next slot: a setup-uv download HTTP 504
+  (run 42469720133, 11-08 10:02Z) and three GitHub-side runs that never started a job (11-09
+  18:20Z daily, 11-09 18:22Z and 11-11 20:22Z hourly).
+
+### 21.4 Catch-up and RealtimeTotals lookback: 6 to 24 hours
+
+With GitHub cron alone, run gaps reached 7 h, one hour short of losing hours for good.
+`CATCHUP_HOURS` and `REALTIME_LOOKBACK_H` are now 24 (`88ea0c6`); the CLI default follows
+`hourly.CATCHUP_HOURS`. Worst case after a one-day outage: 23 catch-up predictions in one run,
+inside the 12 min job timeout. No cron change (Neon free compute is the binding cost).
+
+### 21.5 Core live, availability and live scores
+
+- **Core live** (BUILD_PLAN §9: at least 24 consecutive clean scheduled hours): met at issue hour
+  **2026-11-02 20:00Z**, the 24th consecutive hour (from 11-01 21Z) whose `ok` run was a
+  Cloudflare dispatch. Counting every on-time `ok` hour, whichever scheduler started it, it was
+  met at 11-02 17:00Z. Five hours since 11-01 were served first by the GitHub fallback (11-01 20Z,
+  11-04 18Z, 11-12 12Z, 11-17 12Z, 11-20 07Z), all on time.
+- Clean streaks (Cloudflare-dispatched `ok` hours): 33 h (11-01 21Z to 11-03 05Z), 185 h
+  (11-04 19Z to 11-12 11Z), 119 h, 66 h, 66 h (to 11-23 01Z, ongoing).
+- Availability since 11-01 18Z: 481 of 512 issue hours have 24 champion rows (93.9 %); the 31
+  missing hours are the §21.3 incident.
+- Live MAPE, issue hours 11-01 18Z onwards, 10,740 scored rows per model (all models on the same
+  rows), IESO before the §21.8 repair: champion 2.558 %, IESO 1.690 %, seasonal naive 24 h
+  4.105 %, seasonal naive 168 h 4.326 %, persistence 8.933 %. Last 7 days to 11-22 05Z (4,008
+  rows): champion 1.969 %, IESO 2.101 %.
+- 80 % interval of the champion: coverage 0.825 since 11-01 18Z (10,740 rows), 0.822 over the
+  last 14 days, inside `COVERAGE_BAND` (0.76, 0.84).
+
+### 21.6 GitHub cron, measured
+
+| period | trigger | slots | runs started | share | median gap between runs |
+|---|---|---:|---:|---:|---:|
+| 2026-10-26 to 11-01 | GitHub cron only | 564 | 40 | 7.1 % | 277 min |
+| 2026-11-01 18Z to 11-23 01Z | GitHub cron (fallback) | 1,534 | 80 | 5.2 % | 390 min |
+| 2026-11-01 18Z to 11-23 01Z | Cloudflare cron | ~1,023 | 1,022 | ~100 % | 20 min |
+
+The earlier "15 to 25 min late" description (ADR-0012, `hourly.yml`, §17.1) was wrong and has
+been corrected: GitHub drops most slots outright.
+
+### 21.7 Interval recalibration is live
+
+The daily job has replaced the champion's p10/p90 offsets every day since 2026-11-06, when 14
+EST days of final-scored live residuals first existed (`interval_recalibrated` events 13 to 38;
+`intervals.v0002.json` to `intervals.v0018.json`; the 11-22 fit used 30 days, 15,396 rows).
+Coverage since 11-07: 0.813 (8.1 % below p10, 10.6 % above p90). The trailing window still holds
+the 10-24 to 11-01 residuals made with stale catch-up inputs until about 12-23; coverage stays in
+band, so nothing was changed.
+
+### 21.8 IESO rows repaired (2026-11-23, INTERVENTION)
+
+- First dry run (`repair.yml` run 45099307708) used the bare cutoff rule and wanted to change 577
+  of 680 issue hours. Reason: the hourly job writes the IESO row at about :02, while IESO reissues
+  at about :25, still before the :30 cutoff. Rewriting with the bare cutoff would have handed IESO
+  a version published after GridCast's own forecast, for almost every hour. `735bb0f` caps the
+  repair at the moment the live row was written (`prediction_runs.created_at`) and leaves the
+  run row untouched, so only versions the ingest had not read yet are corrected.
+- Second dry run (run 45100248067), then the applied run **45100324658** (2026-11-23 02:27Z,
+  `pipeline_runs` job `repair_ieso_rows`, `ok`), window issue hours 2026-10-24 00Z to 11-22 23Z:
+  680 issue hours with an IESO run row, **125 changed** (3,000 rows upserted: 1,578 changed,
+  144 new, 14,598 unchanged), no stored row without a snapshot. IESO MAPE on the rows with a
+  final actual: 1.818 % (15,444 rows) before, 1.691 % (15,588 rows) after.
+- After the repair the mean snapshot age behind the IESO rows is 0.9 to 2.0 h on every issue
+  day from 10-24 to 11-03 (it was up to 230 h, §21.2).
+- Champion-paired MAPE, issue hours from 10-24 (the 30-day window of the scoreboard): IESO
+  1.688 % (15,252 scored rows; the 144 new rows are scored by the next daily run), champion
+  2.486 % (15,396). Day-ahead (h = 24) for issue days 10-28 to 11-01: IESO 1.368 % (97 rows
+  scored so far), champion 2.857 % (120). So on those days IESO was clearly better, the opposite
+  of what the 11-01 chart said.
+- The scoreboard's 30-day and since-launch windows and `score_daily` pick the new values up at
+  the next daily run (13:20Z): `v_scores` reads `predictions.p50` directly, the daily job inserts
+  scores for the new rows and rebuilds `score_daily` for the last 45 days.
